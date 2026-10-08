@@ -22,6 +22,7 @@ import {
   RGBA,
   stripAnsiSequences,
   SyntaxStyle,
+  TextAttributes,
 } from "@opentui/core";
 import {
   ApprovalRequestId,
@@ -15916,6 +15917,31 @@ export function App({
                                 style={{ fg: PALETTE.subtle, marginTop: 0, flexShrink: 0 }}
                               />
                             </box>
+                          </box>
+                        );
+                      }
+
+                      // T3 stores model reasoning as its own message role; keep it visible
+                      // but dimmed and labelled so it can't be mistaken for the answer.
+                      if ((entry.message.role as string) === "reasoning") {
+                        return (
+                          <box
+                            key={entry.id}
+                            style={{
+                              width: "100%",
+                              marginTop: 0,
+                              marginBottom: 1,
+                              paddingLeft: 1,
+                              flexDirection: "column",
+                              border: ["left"],
+                              borderColor: PALETTE.divider,
+                            }}
+                          >
+                            <text content="thinking" style={{ fg: PALETTE.subtle }} />
+                            <text
+                              content={renderMessageBody(entry)}
+                              style={{ fg: PALETTE.muted, attributes: TextAttributes.ITALIC }}
+                            />
                           </box>
                         );
                       }

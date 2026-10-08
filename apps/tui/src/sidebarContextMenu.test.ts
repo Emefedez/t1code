@@ -14,9 +14,11 @@ import {
 } from "./sidebarContextMenu";
 
 describe("sidebarContextMenu", () => {
-  it("matches the web thread context menu items", () => {
+  it("includes appearance controls in the thread context menu", () => {
     expect(buildThreadContextMenuItems()).toEqual([
       { id: "rename", label: "Rename thread" },
+      { id: "thread-color", label: "Sidebar color" },
+      { id: "thread-tone", label: "Sidebar tone" },
       { id: "mark-unread", label: "Mark unread" },
       { id: "open-editor", label: "Open in Editor" },
       { id: "open-folder", label: "Open Folder" },

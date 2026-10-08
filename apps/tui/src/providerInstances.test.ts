@@ -150,6 +150,43 @@ describe("providerInstances", () => {
     ]);
   });
 
+  it("shows LMDeck's local catalog without inherited Claude or global custom models", () => {
+    const localModel = { ...model("mlx-community/Qwen3.8-27B-4bit"), isCustom: true };
+    const providers = [
+      provider({
+        instanceId: "claudeAgent",
+        driver: "claudeAgent",
+        models: [model("claude-opus-5")],
+      }),
+      provider({
+        instanceId: "lmdeck",
+        driver: "claudeAgent",
+        models: [model("claude-opus-5"), localModel],
+      }),
+    ];
+    expect(
+      getProviderInstanceModelOptions(providers, decodeProviderInstanceId("lmdeck"), [
+        { slug: "custom/cloud", name: "Cloud", isCustom: true },
+      ]),
+    ).toEqual([{ slug: localModel.slug, name: localModel.name, isCustom: true }]);
+    expect(getProviderInstanceModels(providers, decodeProviderInstanceId("claudeAgent"))).toEqual([
+      model("claude-opus-5"),
+    ]);
+    expect(
+      getProviderInstanceModelOptions(
+        [
+          provider({
+            instanceId: "lmdeck",
+            driver: "claudeAgent",
+            models: [model("claude-opus-5")],
+          }),
+        ],
+        decodeProviderInstanceId("lmdeck"),
+        [{ slug: "claude-opus-5", name: "Opus", isCustom: false }],
+      ),
+    ).toEqual([]);
+  });
+
   it("preserves server model display metadata in picker options", () => {
     const providers = [
       provider({

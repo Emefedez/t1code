@@ -38,6 +38,7 @@ describe("prefs", () => {
     await writePrefs(paths, {
       tuiThemeId: "terminal-match",
       selectedThreadId: "thread-1",
+      threadAppearances: { "thread-2": { color: "red", tone: "strong" } },
       locallyUnreadThreadIds: ["thread-2"],
       threadLastVisitedAtById: {
         "thread-1": "2026-03-24T12:00:00.000Z",
@@ -78,6 +79,7 @@ describe("prefs", () => {
     await expect(readPrefs(paths)).resolves.toEqual({
       tuiThemeId: "terminal-match",
       selectedThreadId: "thread-1",
+      threadAppearances: { "thread-2": { color: "red", tone: "strong" } },
       locallyUnreadThreadIds: ["thread-2"],
       threadLastVisitedAtById: {
         "thread-1": "2026-03-24T12:00:00.000Z",

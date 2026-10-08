@@ -18,7 +18,7 @@ import {
 import { WsTransport } from "./wsTransport";
 
 export interface NativeApiAdapterOptions {
-  readonly transport: WsTransport;
+  readonly transport: Pick<WsTransport, "request" | "subscribe" | "getLatestPush">;
   readonly dialogs?: {
     pickFolder?: () => Promise<string | null>;
     confirm?: (message: string) => Promise<boolean>;

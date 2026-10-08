@@ -4,12 +4,15 @@ import path from "node:path";
 import * as Duration from "effect/Duration";
 import type {
   CliRenderer,
+  BoxRenderable,
+  Renderable,
   InputRenderable,
   PasteEvent,
   ScrollBoxRenderable,
   TerminalConsole,
   TextareaRenderable,
 } from "@opentui/core";
+import { T3Transport } from "./t3Transport";
 import {
   addDefaultParsers,
   CliRenderEvents,
@@ -219,8 +222,6 @@ import {
 } from "./connectionsPanel";
 import { type TuiPrefs, readPrefs, writePrefs } from "./prefs";
 import {
-  ADDITIONAL_COMING_SOON_MODEL_PROVIDER_OPTIONS,
-  COMING_SOON_INSTALL_PROVIDER_OPTIONS,
   INSTALL_PROVIDER_SETTINGS,
   buildDeleteProviderInstancePatch,
   buildDefaultProviderInstanceUpdatePatch,
@@ -298,8 +299,30 @@ import {
   resolveProjectPrimaryAction,
   resolveProjectExpansionOnRowPress,
 } from "./sidebarProjects";
+import {
+  DEFAULT_THREAD_APPEARANCE,
+  THREAD_COLOR_OPTIONS,
+  THREAD_TONE_OPTIONS,
+  normalizeThreadAppearances,
+  nextThreadAppearance,
+  readableThreadText,
+  resolveThreadAppearance,
+  resolveThreadTheme,
+  type ThreadAppearance,
+} from "./threadAppearance";
+import {
+  groupThreadSettlement,
+  isThreadSettled,
+  supportsThreadSettlement,
+  supportsThreadAutoSettleOptOut,
+  threadSettlementCommand,
+  type ThreadSettlementInfo,
+} from "./threadSettlement";
+import { readProviderUsageWindows } from "./providerUsage";
+import { collectUnreadThreadUpdates } from "./threadUpdates";
 import { DEFAULT_THREAD_TITLE, truncateTitleForDisplay } from "./threadTitle";
 import { isThreadSessionActivelyWorking } from "./threadSessionState";
+import { fetchLmdeckLoad, formatLmdeckLoad, type LmdeckLoad } from "./lmdeckLoad";
 import {
   DRAFT_THREAD_ID_PREFIX,
   isDraftThreadId,
@@ -307,18 +330,10 @@ import {
   shouldClearPendingCreatedThread,
 } from "./threadSelection";
 import { resolveWorkEntryIcon } from "./workEntryIcons";
+import { focusOrder, nextFocusStop, type FocusArea, type ComposerControl } from "./focusNavigation";
 
 addDefaultParsers(CODE_BLOCK_TREE_SITTER_PARSERS);
 
-type FocusArea =
-  | "projects"
-  | "threads"
-  | "controls"
-  | "composer"
-  | "timeline"
-  | "terminal"
-  | "diff"
-  | "settings";
 type MainView =
   | "thread"
   | "settings"
@@ -342,6 +357,9 @@ type OverlayMenu =
   | "composer-branch";
 type SettingsSelectKind =
   | "theme"
+  | "thread-appearance"
+  | "thread-color"
+  | "thread-tone"
   | "theme-preset"
   | "timestamp-format"
   | "thread-env"
@@ -973,9 +991,9 @@ function buildCodeBlockSyntax(_palette: TuiPalette) {
   });
 }
 
-let MESSAGE_MARKDOWN_SYNTAX = buildMessageMarkdownSyntax(PALETTE);
-let DIFF_SYNTAX = buildDiffSyntax(PALETTE);
-let CODE_BLOCK_SYNTAX = buildCodeBlockSyntax(PALETTE);
+let MESSAGE_MARKDOWN_SYNTAX: SyntaxStyle;
+let DIFF_SYNTAX: SyntaxStyle;
+const CODE_BLOCK_SYNTAX = buildCodeBlockSyntax(PALETTE);
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -1325,14 +1343,15 @@ function formatMessageTimestamp(
 }
 
 function providerIcon(provider: ProviderKind | string | null | undefined): string {
-  return provider === "claudeAgent" ? "✱" : "󰚩";
+  return providerPickerIcon(provider ?? "codex");
 }
 
 function providerPickerIcon(provider: string): string {
   if (provider === "claudeAgent") return "✱";
   if (provider === "cursor") return "⌖";
   if (provider === "opencode") return "⌘";
-  if (provider === "githubCopilot") return "";
+  if (provider === "githubCopilot" || provider === "copilot") return "";
+  if (provider === "antigravity") return "▲";
   if (provider === "gemini") return "◇";
   if (provider === "acpRegistry") return "󰕮";
   if (provider === "piAgent") return "π";
@@ -2733,16 +2752,6 @@ const EMPTY_PROVIDER_SNAPSHOTS: ReadonlyArray<ServerProvider> = [];
 const EMPTY_KEYBINDINGS: ResolvedKeybindingsConfig = [];
 const DEFAULT_CODEX_INSTANCE_ID = defaultInstanceIdForDriver("codex" as ProviderDriverKind);
 const DEFAULT_CLAUDE_INSTANCE_ID = defaultInstanceIdForDriver("claudeAgent" as ProviderDriverKind);
-const COMING_SOON_MODEL_PROVIDER_OPTIONS = [
-  ...PROVIDER_OPTIONS.filter((option) => !option.available).map((option) => ({
-    id: option.value,
-    label: option.label,
-  })),
-  ...ADDITIONAL_COMING_SOON_MODEL_PROVIDER_OPTIONS.map((option) => ({
-    id: option.provider,
-    label: option.title,
-  })),
-] as const;
 
 type ModelMenuInstanceEntry = {
   readonly instanceId: ProviderInstanceId;
@@ -2917,6 +2926,7 @@ function normalizePersistedInteractionMode(value: string | undefined): "default"
 }
 
 function resolvePersistedModel(provider: ProviderKind, model: string | undefined): string {
+  if (process.env.T1CODE_T3_ORIGIN && model?.trim()) return model.trim();
   return (
     resolveSelectableModel(provider, model, MODEL_OPTIONS_BY_PROVIDER[provider]) ??
     DEFAULT_MODEL_BY_PROVIDER[provider]
@@ -3090,6 +3100,7 @@ function ToolbarButton(props: {
   icon?: string;
   label?: string | undefined;
   active?: boolean;
+  focused?: boolean;
   disabled?: boolean;
   iconColor?: TuiColor;
   marginRight?: number;
@@ -3098,9 +3109,26 @@ function ToolbarButton(props: {
   chrome?: "default" | "bare";
   width?: number;
   justifyContent?: "center" | "flex-start" | "flex-end";
+  control?: ComposerControl;
   onPress: (event?: SidebarMouseEvent) => void;
 }) {
   const [hovered, setHovered] = useState(false);
+  const [keyboardFocused, setKeyboardFocused] = useState(false);
+  const buttonRef = useRef<BoxRenderable | null>(null);
+  useEffect(() => {
+    const button = buttonRef.current;
+    if (!button) return;
+    button.focusable = !props.disabled;
+    const focus = () => setKeyboardFocused(true);
+    const blur = () => setKeyboardFocused(false);
+    button.on("focused", focus);
+    button.on("blurred", blur);
+    return () => {
+      button.off("focused", focus);
+      button.off("blurred", blur);
+    };
+  }, [props.disabled]);
+  const focused = props.focused || keyboardFocused;
   const foreground = props.disabled ? PALETTE.subtle : props.active ? PALETTE.text : PALETTE.muted;
   const isBare = props.chrome === "bare";
   const restingBackground = props.surface === "inset" ? PALETTE.controlInset : PALETTE.control;
@@ -3119,6 +3147,15 @@ function ToolbarButton(props: {
 
   return (
     <box
+      ref={buttonRef}
+      {...(props.control ? { id: `composer-control-${props.control}` } : {})}
+      onKeyDown={(key) => {
+        if (key.defaultPrevented) return;
+        if (!props.disabled && ["return", "enter", "space"].includes(key.name)) {
+          key.preventDefault();
+          props.onPress();
+        }
+      }}
       onMouseOver={() => setHovered(true)}
       onMouseOut={() => setHovered(false)}
       onMouseDown={(event) => {
@@ -3128,7 +3165,7 @@ function ToolbarButton(props: {
         props.onPress(event);
       }}
       style={{
-        backgroundColor: background,
+        backgroundColor: focused ? PALETTE.controlActive : background,
         paddingLeft: isBare ? 1 : 1,
         paddingRight: isBare ? 1 : 1,
         marginRight: isBare ? 0 : (props.marginRight ?? 1),
@@ -3154,7 +3191,9 @@ function ToolbarButton(props: {
           style={{ fg: props.iconColor ?? foreground, marginRight: props.label ? 1 : 0 }}
         />
       ) : null}
-      {props.label ? <text content={props.label} style={{ fg: foreground }} /> : null}
+      {props.label ? (
+        <text content={props.label} style={{ fg: focused ? PALETTE.text : foreground }} />
+      ) : null}
     </box>
   );
 }
@@ -3324,6 +3363,8 @@ function SidebarRow(props: {
   compact?: boolean;
   suppressHighlight?: boolean;
   activeBackgroundColor?: TuiColor;
+  backgroundColor?: TuiColor | undefined;
+  hoverBackgroundColor?: TuiColor | undefined;
   onPress?: (event: SidebarMouseEvent) => void;
   onSecondaryPress?: (event: SidebarMouseEvent) => void;
   children: React.ReactNode;
@@ -3339,8 +3380,8 @@ function SidebarRow(props: {
         : props.active
           ? activeBackgroundColor
           : hovered
-            ? PALETTE.controlHover
-            : "transparent";
+            ? (props.hoverBackgroundColor ?? PALETTE.controlHover)
+            : (props.backgroundColor ?? "transparent");
 
   return (
     <box
@@ -4063,6 +4104,7 @@ function ComposerSendButton(props: {
   label?: string;
   onPress: () => void;
   disabled?: boolean;
+  focused?: boolean;
   variant?: "send" | "stop";
   width?: number;
 }) {
@@ -4093,7 +4135,7 @@ function ComposerSendButton(props: {
         paddingRight: props.label ? 1 : 0,
         width: props.label ? "auto" : (props.width ?? 3),
         height: 1,
-        backgroundColor: background,
+        backgroundColor: props.focused ? PALETTE.controlActive : background,
         flexDirection: "row",
         justifyContent: "center",
         alignItems: "center",
@@ -4145,6 +4187,7 @@ export function App({
   const composerValueRef = useRef("");
   const deferredComposerSyncRef = useRef(createDeferredComposerSyncState());
   const timelineScrollRef = useRef<ScrollBoxRenderable | null>(null);
+  const settingsSelectScrollRef = useRef<ScrollBoxRenderable | null>(null);
   const composerBranchScrollRef = useRef<ScrollBoxRenderable | null>(null);
   const gitRefreshInFlightRef = useRef(false);
   const gitRefreshQueuedRef = useRef(false);
@@ -4170,6 +4213,7 @@ export function App({
   const [selectedThreadId, setSelectedThreadId] = useState<string | undefined>();
   const selectedProjectIdRef = useRef<string | undefined>(undefined);
   const selectedThreadIdRef = useRef<string | undefined>(undefined);
+  const synchronizedT3ThreadSettingsRef = useRef<string | undefined>(undefined);
   const handledWelcomeBootstrapRef = useRef(false);
   const [pendingCreatedProjectId, setPendingCreatedProjectId] = useState<string | null>(null);
   const [pendingCreatedThreadId, setPendingCreatedThreadId] = useState<string | null>(null);
@@ -4185,12 +4229,23 @@ export function App({
     useState<ProviderInstanceId>(DEFAULT_CODEX_INSTANCE_ID);
   const [draftModel, setDraftModel] = useState(DEFAULT_MODEL_BY_PROVIDER.codex);
   const [draftModelOptions, setDraftModelOptions] = useState<ProviderModelOptions | undefined>();
+  const t3SelectionRef = useRef<{
+    instanceId: ProviderInstanceId;
+    model: string;
+    options?: readonly ProviderOptionSelection[] | undefined;
+  }>({ instanceId: draftProviderInstanceId, model: draftModel });
   const [draftProviderOptionSelections, setDraftProviderOptionSelections] = useState<
     readonly ProviderOptionSelection[] | undefined
   >();
   const [draftRuntimeMode, setDraftRuntimeMode] = useState<RuntimeMode>("full-access");
+  t3SelectionRef.current = {
+    instanceId: draftProviderInstanceId,
+    model: draftModel,
+    options: draftProviderOptionSelections,
+  };
   const [draftInteractionMode, setDraftInteractionMode] = useState<"default" | "plan">("default");
   const [focusArea, setFocusArea] = useState<FocusArea>("composer");
+  const [focusedComposerControl, setFocusedComposerControl] = useState<ComposerControl>("model");
   const [diffOpen, setDiffOpen] = useState(false);
   const [planPanelOpen, setPlanPanelOpen] = useState(false);
   const [sidebarCollapsedPreference, setSidebarCollapsedPreference] = useState(false);
@@ -4234,10 +4289,16 @@ export function App({
   const [composerEnvMenuIndex, setComposerEnvMenuIndex] = useState(0);
   const [composerBranchMenuIndex, setComposerBranchMenuIndex] = useState(0);
   const [settingsSelectKind, setSettingsSelectKind] = useState<SettingsSelectKind>("git-model");
+  const [appearanceThreadId, setAppearanceThreadId] = useState<string | null>(null);
+  const [threadAppearances, setThreadAppearances] = useState<Record<string, ThreadAppearance>>({});
+  const previousThreadUpdatesRef = useRef<ReadonlyMap<string, string> | null>(null);
   const [settingsSelectIndex, setSettingsSelectIndex] = useState(0);
   const [sidebarSortIndex, setSidebarSortIndex] = useState(0);
   const [traitsMenuIndex, setTraitsMenuIndex] = useState(0);
   const [expandedProjectIds, setExpandedProjectIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const [expandedSettledProjectIds, setExpandedSettledProjectIds] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
   const [locallyUnreadThreadIds, setLocallyUnreadThreadIds] = useState<ReadonlySet<string>>(
@@ -4641,15 +4702,38 @@ export function App({
     appSettings.theme,
     tuiThemeId,
   );
-  const activeTheme = resolveTuiTheme(appSettings.theme, tuiThemeId, {
-    systemMode: systemThemeMode,
-    terminalColors: terminalThemeColors,
-  });
+  const baseTheme = useMemo(
+    () =>
+      resolveTuiTheme(appSettings.theme, tuiThemeId, {
+        systemMode: systemThemeMode,
+        terminalColors: terminalThemeColors,
+      }),
+    [appSettings.theme, tuiThemeId, systemThemeMode, terminalThemeColors],
+  );
+  const selectedThreadAppearance =
+    mainView === "thread" ? threadAppearances[selectedThreadId ?? ""] : undefined;
+  const activeTheme = useMemo(
+    () => resolveThreadTheme(baseTheme, selectedThreadAppearance),
+    [baseTheme, selectedThreadAppearance],
+  );
+  const syntaxStyles = useMemo(
+    () => ({
+      markdown: buildMessageMarkdownSyntax(activeTheme.palette),
+      diff: buildDiffSyntax(activeTheme.palette),
+    }),
+    [activeTheme.palette],
+  );
   ACTIVE_TUI_THEME = activeTheme;
   Object.assign(PALETTE, activeTheme.palette);
-  MESSAGE_MARKDOWN_SYNTAX = buildMessageMarkdownSyntax(activeTheme.palette);
-  DIFF_SYNTAX = buildDiffSyntax(activeTheme.palette);
-  CODE_BLOCK_SYNTAX = buildCodeBlockSyntax(activeTheme.palette);
+  MESSAGE_MARKDOWN_SYNTAX = syntaxStyles.markdown;
+  DIFF_SYNTAX = syntaxStyles.diff;
+  useEffect(
+    () => () => {
+      syntaxStyles.markdown.destroy();
+      syntaxStyles.diff.destroy();
+    },
+    [syntaxStyles],
+  );
 
   useEffect(() => {
     draftThreadsByProjectIdRef.current = draftThreadsByProjectId;
@@ -4754,6 +4838,7 @@ export function App({
           selectedThreadIdRef.current = prefs.selectedThreadId;
           setSelectedThreadId(prefs.selectedThreadId);
         }
+        setThreadAppearances(normalizeThreadAppearances(prefs.threadAppearances));
         if (prefs.expandedProjectIds?.length) {
           setExpandedProjectIds(new Set(prefs.expandedProjectIds));
         }
@@ -4842,37 +4927,47 @@ export function App({
         setDiffView(prefs.diffView ?? "unified");
         setPrefsReady(true);
 
-        const attachedServer = resolveAttachedServerConnection();
-        const server = attachedServer
-          ? {
-              wsUrl: attachedServer.wsUrl,
-              stop: () => undefined,
-            }
-          : await startServerSupervisor({
-              homeDir: paths.homeDir,
-              logPath: paths.logPath,
-              onExit: ({ code, signal }) => {
-                if (disposed) return;
-                logger.log("server.onExit", { code, signal: signal ?? null });
-                setStatus("Reconnecting");
-              },
-              onRestart: ({ attempt }) => {
-                if (disposed) return;
-                logger.log("server.onRestart", { attempt });
-                setStatus("Restarting");
-              },
-              onLog: (event, details) => logger.log(event, details),
-            });
+        const t3Origin = process.env.T1CODE_T3_ORIGIN;
+        const attachedServer = t3Origin ? null : resolveAttachedServerConnection();
+        const server = t3Origin
+          ? { wsUrl: t3Origin.replace(/^http/, "ws") + "/ws", stop: () => undefined }
+          : attachedServer
+            ? {
+                wsUrl: attachedServer.wsUrl,
+                stop: () => undefined,
+              }
+            : await startServerSupervisor({
+                homeDir: paths.homeDir,
+                logPath: paths.logPath,
+                onExit: ({ code, signal }) => {
+                  if (disposed) return;
+                  logger.log("server.onExit", { code, signal: signal ?? null });
+                  setStatus("Reconnecting");
+                },
+                onRestart: ({ attempt }) => {
+                  if (disposed) return;
+                  logger.log("server.onRestart", { attempt });
+                  setStatus("Restarting");
+                },
+                onLog: (event, details) => logger.log(event, details),
+              });
         if (attachedServer) {
           logger.log("server.attached", {
             host: attachedServer.host,
             port: attachedServer.port,
           });
         }
-        const transport = new WsTransport({
-          url: server.wsUrl,
-          onWarning: (message, details) => logger.log("ws.warning", { message, details }),
-        });
+        const transport = t3Origin
+          ? new T3Transport(
+              t3Origin,
+              process.env.T1CODE_T3_TOKEN!,
+              () => selectedThreadIdRef.current,
+              () => t3SelectionRef.current,
+            )
+          : new WsTransport({
+              url: server.wsUrl,
+              onWarning: (message, details) => logger.log("ws.warning", { message, details }),
+            });
         setServerWsUrl(server.wsUrl);
         setServerHttpOrigin(resolveHttpOriginFromWsUrl(server.wsUrl));
         const nativeBridge = createTransportNativeApi({ transport });
@@ -4902,6 +4997,20 @@ export function App({
             if (disposed) return;
             refreshAttempts = 0;
             setSnapshot(nextSnapshot);
+            if (
+              t3Origin &&
+              !isDraftThreadId(selectedThreadIdRef.current) &&
+              !nextSnapshot.threads.some((thread) => thread.id === selectedThreadIdRef.current)
+            ) {
+              const latest = [...nextSnapshot.threads]
+                .filter((thread) => !thread.archivedAt && !isThreadSettled(thread))
+                .toSorted((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+              if (latest) {
+                selectedThreadIdRef.current = latest.id;
+                setSelectedThreadId(latest.id);
+                setSelectedProjectId(latest.projectId);
+              }
+            }
             logger.log("snapshot.refreshed", {
               reason,
               projectCount: nextSnapshot.projects.length,
@@ -4995,12 +5104,15 @@ export function App({
           void refresh("domain-event");
         });
         const unsubscribeServerConfig = nativeBridge.events.onServerConfigUpdated((payload) => {
+          const sharedSettings = (payload as typeof payload & { settings?: ServerSettings })
+            .settings;
+          if (sharedSettings) setServerSettings(sharedSettings);
           setServerConfig((current) =>
             current
               ? {
                   ...current,
-                  issues: payload.issues,
-                  providers: payload.providers,
+                  issues: payload.issues ?? current.issues,
+                  providers: payload.providers ?? current.providers,
                   ...(payload.providerInstances
                     ? { providerInstances: payload.providerInstances }
                     : {}),
@@ -5051,12 +5163,25 @@ export function App({
 
   useEffect(() => {
     selectedThreadIdRef.current = selectedThreadId;
-  }, [selectedThreadId]);
+    if (process.env.T1CODE_T3_ORIGIN && api) {
+      let cancelled = false;
+      void api.orchestration
+        .getSnapshot()
+        .then((next) => {
+          if (!cancelled) setSnapshot(next);
+        })
+        .catch((error) => logger.log("thread.loadFailed", { error: String(error) }));
+      return () => {
+        cancelled = true;
+      };
+    }
+  }, [selectedThreadId, api, logger]);
 
   useEffect(() => {
     if (!prefsReady) return;
     const prefs = {
       mainView,
+      threadAppearances,
       draftProvider,
       draftProviderInstanceId,
       draftModel,
@@ -5096,6 +5221,7 @@ export function App({
     draftRuntimeMode,
     draftThreadsByProjectId,
     locallyUnreadThreadIds,
+    threadAppearances,
     locallyVisitedThreads,
     logger,
     mainView,
@@ -5145,8 +5271,10 @@ export function App({
   const activeProjectId = selectedProjectId ?? sortedProjects[0]?.id;
   const activeProject = sortedProjects.find((project) => project.id === activeProjectId) ?? null;
   const hasPulsingThreadStatus = useMemo(
-    () => allThreads.some((thread) => isThreadSessionActivelyWorking(thread.session)),
-    [allThreads],
+    () =>
+      locallyUnreadThreadIds.size > 0 ||
+      allThreads.some((thread) => isThreadSessionActivelyWorking(thread.session)),
+    [allThreads, locallyUnreadThreadIds],
   );
   const threadsByProject = useMemo(() => {
     const map = new Map<string, ThreadReadModel[]>();
@@ -5166,7 +5294,8 @@ export function App({
         bucket,
         appSettings.sidebarThreadSortOrder ?? DEFAULT_SIDEBAR_THREAD_SORT_ORDER,
       );
-      bucket.splice(0, bucket.length, ...sortedBucket);
+      const grouped = groupThreadSettlement(sortedBucket);
+      bucket.splice(0, bucket.length, ...grouped.active, ...grouped.settled);
     }
     return map;
   }, [allThreads, appSettings.sidebarThreadSortOrder, projects]);
@@ -5196,6 +5325,52 @@ export function App({
   const activeThread = activeDraftThread
     ? null
     : (threads.find((thread) => thread.id === activeThreadId) ?? null);
+  const supportsSettlement = supportsThreadSettlement(serverConfig?.environment.capabilities);
+  const supportsAutoSettleOptOut = supportsThreadAutoSettleOptOut(
+    serverConfig?.environment.capabilities,
+  );
+  const setThreadSettled = useCallback(
+    async (thread: ThreadReadModel, settled: boolean) => {
+      if (!api || !supportsSettlement) return;
+      if (
+        settled &&
+        (thread.session?.status === "starting" || thread.session?.status === "running")
+      ) {
+        setStatus("Wait for the thread to finish before settling");
+        return;
+      }
+      try {
+        // Installed T3 supports these commands; the bundled older server does not.
+        await api.orchestration.dispatchCommand(
+          threadSettlementCommand(thread.id, settled, newCommandId()) as never,
+        );
+        setStatus(settled ? "Thread settled" : "Thread reopened");
+      } catch (error) {
+        setStatus(error instanceof Error ? error.message : "Could not change thread settlement");
+      }
+    },
+    [api, supportsSettlement],
+  );
+
+  const toggleThreadAutoSettle = useCallback(
+    async (thread: ThreadReadModel) => {
+      if (!api || !supportsAutoSettleOptOut) return;
+      const enabled = !!(thread as ThreadSettlementInfo).autoSettleDisabledAt;
+      try {
+        await api.orchestration.dispatchCommand({
+          type: "thread.auto-settle.set",
+          commandId: newCommandId(),
+          threadId: thread.id,
+          enabled,
+        } as never);
+        setStatus(enabled ? "Auto-settle enabled" : "Auto-settle disabled");
+      } catch (error) {
+        setStatus(error instanceof Error ? error.message : "Could not change auto-settle");
+      }
+    },
+    [api, supportsAutoSettleOptOut],
+  );
+
   const activeThreadIsRunning = isThreadSessionActivelyWorking(activeThread?.session ?? null);
   const activeThreadBranch = activeThread?.branch ?? activeDraftThread?.branch ?? null;
   const activeWorktreePath = activeThread?.worktreePath ?? activeDraftThread?.worktreePath ?? null;
@@ -5302,6 +5477,24 @@ export function App({
         .toSorted((left, right) => left.createdAt.localeCompare(right.createdAt))
     : [];
   const showAssistantTyping = activeThreadIsRunning || activePendingSends.length > 0;
+  const [lmdeckLoad, setLmdeckLoad] = useState<LmdeckLoad | null>(null);
+  useEffect(() => {
+    if (!showAssistantTyping) {
+      setLmdeckLoad(null);
+      return;
+    }
+    let cancelled = false;
+    const poll = () =>
+      void fetchLmdeckLoad().then((load) => {
+        if (!cancelled) setLmdeckLoad(load);
+      });
+    poll();
+    const timer = setInterval(poll, 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [showAssistantTyping]);
   const latestProposedPlan = activeThread
     ? findLatestProposedPlan(activeThread.proposedPlans, activeThread.latestTurn?.turnId ?? null)
     : null;
@@ -5350,6 +5543,9 @@ export function App({
   const providerSnapshotByInstanceId = useMemo(
     () => new Map(providerSnapshots.map((provider) => [provider.instanceId, provider] as const)),
     [providerSnapshots],
+  );
+  const activeProviderUsageWindows = readProviderUsageWindows(
+    providerSnapshotByInstanceId.get(draftProviderInstanceId)?.usageLimits,
   );
   const dismissedProviderUpdateNoticeKeys = useMemo(
     () => new Set(appSettings.dismissedProviderUpdateNotificationKeys),
@@ -5803,6 +5999,88 @@ export function App({
     totalFavoriteModels > 0 || totalHiddenModels > 0 || totalOrderedModels > 0;
   const settingsSelectItems = useMemo(() => {
     switch (settingsSelectKind) {
+      case "thread-appearance":
+        return [
+          {
+            id: "thread-color",
+            label: "Sidebar color",
+            selected: false,
+            onSelect: () => setSettingsSelectKind("thread-color"),
+          },
+          {
+            id: "thread-tone",
+            label: "Sidebar tone",
+            selected: false,
+            onSelect: () => setSettingsSelectKind("thread-tone"),
+          },
+          ...(supportsSettlement && activeThread
+            ? [
+                {
+                  id: "settlement",
+                  label: isThreadSettled(activeThread) ? "Reopen thread" : "Mark settled",
+                  selected: false,
+                  onSelect: () => {
+                    setOverlayMenu(null);
+                    void setThreadSettled(activeThread, !isThreadSettled(activeThread));
+                  },
+                },
+                ...(supportsAutoSettleOptOut
+                  ? [
+                      {
+                        id: "auto-settle",
+                        label: `Auto-settle: ${(activeThread as ThreadSettlementInfo).autoSettleDisabledAt ? "Off" : "On"}`,
+                        selected: false,
+                        onSelect: () => {
+                          setOverlayMenu(null);
+                          void toggleThreadAutoSettle(activeThread);
+                        },
+                      },
+                    ]
+                  : []),
+              ]
+            : []),
+        ];
+      case "thread-color":
+        return THREAD_COLOR_OPTIONS.map((option) => ({
+          iconColor: option[activeTheme.mode],
+          id: option.id,
+          label: option.label,
+          selected:
+            (appearanceThreadId
+              ? (threadAppearances[appearanceThreadId]?.color ?? "default")
+              : "default") === option.id,
+          onSelect: () => {
+            if (!appearanceThreadId) return;
+            setThreadAppearances((current) => ({
+              ...current,
+              [appearanceThreadId]: {
+                ...(current[appearanceThreadId] ?? DEFAULT_THREAD_APPEARANCE),
+                color: option.id,
+              },
+            }));
+            setOverlayMenu(null);
+          },
+        }));
+      case "thread-tone":
+        return THREAD_TONE_OPTIONS.map((option) => ({
+          id: option.id,
+          label: option.label,
+          selected:
+            (appearanceThreadId
+              ? (threadAppearances[appearanceThreadId]?.tone ?? "subtle")
+              : "subtle") === option.id,
+          onSelect: () => {
+            if (!appearanceThreadId) return;
+            setThreadAppearances((current) => ({
+              ...current,
+              [appearanceThreadId]: {
+                ...(current[appearanceThreadId] ?? DEFAULT_THREAD_APPEARANCE),
+                tone: option.id,
+              },
+            }));
+            setOverlayMenu(null);
+          },
+        }));
       case "theme":
         return THEME_OPTIONS.map((option) => ({
           id: option,
@@ -5908,6 +6186,14 @@ export function App({
         }));
     }
   }, [
+    activeThread,
+    supportsSettlement,
+    supportsAutoSettleOptOut,
+    setThreadSettled,
+    toggleThreadAutoSettle,
+    activeTheme.mode,
+    threadAppearances,
+    appearanceThreadId,
     appSettings.theme,
     appSettings.timestampFormat,
     automaticGitFetchIntervalSeconds,
@@ -6286,6 +6572,10 @@ export function App({
       }
       return;
     }
+    if (!selectedThreadId) {
+      setSelectedThreadId(threads[0]?.id);
+      return;
+    }
     if (
       pendingCreatedThreadId &&
       selectedThreadId === pendingCreatedThreadId &&
@@ -6388,7 +6678,41 @@ export function App({
   }, [hasPulsingThreadStatus]);
 
   useEffect(() => {
-    if (!activeThread) return;
+    if (!activeThread) {
+      synchronizedT3ThreadSettingsRef.current = undefined;
+      return;
+    }
+    if (process.env.T1CODE_T3_ORIGIN) {
+      const selection = (
+        activeThread as ThreadReadModel & {
+          modelSelection?: {
+            instanceId: ProviderInstanceId;
+            model: string;
+            options?: readonly ProviderOptionSelection[];
+          };
+        }
+      ).modelSelection;
+      if (selection) {
+        const entry = modelMenuEntryByInstanceId.get(selection.instanceId);
+        const settingsKey = JSON.stringify([
+          activeThread.id,
+          selection,
+          activeThread.runtimeMode,
+          activeThread.interactionMode,
+          entry?.provider,
+        ]);
+        // Refreshes and local provider changes must not overwrite an unsent selection.
+        if (synchronizedT3ThreadSettingsRef.current === settingsKey) return;
+        synchronizedT3ThreadSettingsRef.current = settingsKey;
+        if (entry) setDraftProvider(entry.provider);
+        setDraftProviderInstanceId(selection.instanceId);
+        setDraftModel(selection.model);
+        setDraftProviderOptionSelections(selection.options);
+        setDraftRuntimeMode(activeThread.runtimeMode);
+        setDraftInteractionMode(activeThread.interactionMode);
+        return;
+      }
+    }
     const nextProvider = activeThread.session?.providerName;
     const nextProviderInstanceId =
       activeThread.session?.providerInstanceId ??
@@ -6462,8 +6786,20 @@ export function App({
   }, [activeProjectId]);
 
   useEffect(() => {
-    setLocallyUnreadThreadIds((current) => clearLocallyUnreadThread(current, activeThreadId));
-  }, [activeThreadId]);
+    if (!snapshot) return;
+    const previous = previousThreadUpdatesRef.current;
+    setLocallyUnreadThreadIds((current) =>
+      collectUnreadThreadUpdates(
+        previous,
+        allThreads,
+        mainView === "thread" ? activeThreadId : undefined,
+        current,
+      ),
+    );
+    previousThreadUpdatesRef.current = new Map(
+      allThreads.map((thread) => [thread.id, thread.updatedAt]),
+    );
+  }, [snapshot, allThreads, activeThreadId, mainView]);
 
   useEffect(() => {
     setPlanPanelOpen(false);
@@ -6990,7 +7326,12 @@ export function App({
       activeQuestionId && activePendingUserInputAnswers[activeQuestionId]
         ? (activePendingUserInputAnswers[activeQuestionId]?.customAnswer ?? "")
         : "";
-    resetComposerTextarea(customAnswer);
+    // Typing already updates the answer state. Remounting the textarea here
+    // would move its cursor back to the start after every keystroke.
+    if ((composerRef.current?.plainText ?? composerValueRef.current) !== customAnswer) {
+      resetComposerTextarea(customAnswer);
+      focusComposerAtEndSoon();
+    }
   }, [
     activePendingProgress?.activeQuestion?.id,
     activePendingUserInput,
@@ -7251,6 +7592,8 @@ export function App({
   ): readonly ReturnType<typeof buildThreadContextMenuItems>[number][] {
     const thread = snapshot?.threads.find((entry) => entry.id === threadId);
     return buildThreadContextMenuItems({
+      supportsSettlement,
+      settled: isThreadSettled(thread),
       archived: thread?.archivedAt !== null && thread?.archivedAt !== undefined,
     });
   }
@@ -7569,6 +7912,16 @@ export function App({
   ) {
     closeSidebarContextMenu();
 
+    if (actionId === "settle" || actionId === "unsettle") {
+      await setThreadSettled(thread, actionId === "settle");
+      return;
+    }
+    if (actionId === "thread-color" || actionId === "thread-tone") {
+      setAppearanceThreadId(thread.id);
+      openSettingsSelectMenu(actionId);
+      return;
+    }
+
     if (actionId === "rename") {
       setRenameThreadDialog({ threadId: thread.id, value: thread.title });
       return;
@@ -7642,6 +7995,12 @@ export function App({
     threadIds: readonly string[],
   ) {
     closeSidebarContextMenu();
+    if (actionId === "settle" || actionId === "unsettle") {
+      for (const thread of allThreads.filter((thread) => threadIds.includes(thread.id))) {
+        await setThreadSettled(thread, actionId === "settle");
+      }
+      return;
+    }
     if (actionId === "mark-unread") {
       const threads = allThreads.filter((thread) => threadIds.includes(thread.id));
       setLocallyUnreadThreadIds((current) => {
@@ -7817,12 +8176,47 @@ export function App({
   }
 
   useKeyboard((key) => {
+    if (key.defaultPrevented) return;
+    if (
+      overlayMenu &&
+      [
+        "up",
+        "down",
+        "left",
+        "right",
+        "return",
+        "enter",
+        "kpenter",
+        "linefeed",
+        "escape",
+        "tab",
+      ].includes(key.name)
+    )
+      key.preventDefault();
+    if (
+      key.ctrl &&
+      key.shift &&
+      key.name === "s" &&
+      !overlayMenu &&
+      !sidebarContextMenu &&
+      focusArea !== "terminal" &&
+      supportsSettlement &&
+      activeThread
+    ) {
+      key.preventDefault();
+      void setThreadSettled(activeThread, !isThreadSettled(activeThread));
+      return;
+    }
     const ctrlCPressed = isCtrlC({
       keyName: key.name,
       ctrl: key.ctrl,
     });
-    const isNavUp = key.name === "up" || (key.ctrl && key.name === "k");
-    const isNavDown = key.name === "down" || (key.ctrl && key.name === "j");
+    const isPopupTab = key.name === "tab" && Boolean(overlayMenu || sidebarContextMenu);
+    if (isPopupTab) key.preventDefault();
+    const isNavUp =
+      key.name === "up" || (key.ctrl && key.name === "k") || (isPopupTab && key.shift);
+    const isNavDown =
+      key.name === "down" || (key.ctrl && key.name === "j") || (isPopupTab && !key.shift);
     const hasDismissibleLayer = Boolean(
       confirmDialog ||
       renameThreadDialog ||
@@ -7959,6 +8353,10 @@ export function App({
           : sidebarContextMenu.kind === "multi-thread"
             ? buildMultiSelectContextMenuItems({
                 count: sidebarContextMenu.threadIds.length,
+                supportsSettlement,
+                settled: sidebarContextMenu.threadIds.every((id) =>
+                  isThreadSettled(allThreads.find((thread) => thread.id === id)),
+                ),
                 archived: sidebarContextMenu.threadIds.some((threadId) =>
                   archivedThreads.some((thread) => thread.id === threadId),
                 ),
@@ -8108,7 +8506,12 @@ export function App({
         !key.ctrl && !key.meta && !key.super && key.sequence && key.sequence.length === 1
           ? key.sequence
           : "";
-      if (printableSequence && key.name !== "return" && key.name !== "enter") {
+      if (
+        printableSequence &&
+        key.name !== "return" &&
+        key.name !== "enter" &&
+        key.name !== "tab"
+      ) {
         setModelSearchQuery((current) => `${current}${printableSequence}`);
         setModelSubmenuOpen(true);
         setModelMenuIndex(0);
@@ -8459,38 +8862,107 @@ export function App({
       setOverlayMenu(null);
       openDraftThread(activeProjectId);
     }
-    if (key.name === "tab") {
-      const order: FocusArea[] =
-        mainView !== "thread"
-          ? responsiveLayout.showSidebar
-            ? ["projects", "settings"]
-            : ["settings"]
-          : showFullDiffView
-            ? responsiveLayout.showSidebar
-              ? ["projects", "threads", "diff"]
-              : ["diff"]
-            : responsiveLayout.showSidebar
+    if (key.name === "tab" && !key.ctrl && !key.meta) {
+      if (overlayMenu || sidebarContextMenu || imagePreview) {
+        key.preventDefault();
+        return;
+      }
+      if (isComposerFocused() && !key.shift) {
+        if (showSlashCommandMenu && slashCommandItems.length > 0) {
+          key.preventDefault();
+          applyComposerSlashCommand(selectedSlashCommand ?? slashCommandItems[0]!);
+          return;
+        }
+        if (showPathSuggestions && pathSuggestionEntries.length > 0) {
+          key.preventDefault();
+          const selected = pathSuggestionEntries[pathSuggestionIndex] ?? pathSuggestionEntries[0];
+          if (selected) applyComposerPathMention(selected);
+          return;
+        }
+      }
+      key.preventDefault();
+      const fields: Renderable[] = [];
+      const settingsRoot = _renderer.root.findDescendantById("settings-navigation");
+      const visit = (node: Renderable) => {
+        if (!node.visible) return;
+        if (node.focusable && node !== settingsRoot) fields.push(node);
+        for (const child of node.getChildren()) visit(child);
+      };
+      if (mainView !== "thread" && settingsRoot) visit(settingsRoot);
+      const controls: ComposerControl[] = activePendingApproval
+        ? []
+        : [
+            "model",
+            ...(composerTraits ? ["traits" as const] : []),
+            "interaction",
+            "runtime",
+            ...(activeThreadId ? ["thread" as const] : []),
+            ...(!imagePasteInFlight &&
+            (composerPrimaryAction === "stop" || composerHasSendableContent)
+              ? ["send" as const]
+              : []),
+            ...(activeProjectId && isGitRepo
               ? [
-                  "projects",
-                  "threads",
-                  "timeline",
-                  ...(terminalOpen ? (["terminal"] as const) : []),
-                  "controls",
-                  "composer",
-                  "diff",
+                  "env" as const,
+                  ...(gitCwd && composerBranchMenuItems.length > 0 ? ["branch" as const] : []),
                 ]
-              : [
-                  "timeline",
-                  ...(terminalOpen ? (["terminal"] as const) : []),
-                  "controls",
-                  "composer",
-                  "diff",
-                ];
-      const index = order.indexOf(focusArea);
-      setFocusArea(
-        order[(index + 1) % order.length] ??
-          (responsiveLayout.showSidebar ? "projects" : "composer"),
-      );
+              : []),
+          ];
+      const order = focusOrder({
+        sidebar: responsiveLayout.showSidebar,
+        settings: mainView !== "thread",
+        fullDiff: showFullDiffView,
+        terminal: terminalOpen,
+        controls,
+        settingsFields: fields.map((field) => field.id),
+      });
+      const currentField = fields.find((field) => field.focused);
+      const focusedControlId = _renderer.currentFocusedRenderable?.id;
+      const current = focusedControlId?.startsWith("composer-control-")
+        ? `controls:${focusedControlId.slice("composer-control-".length)}`
+        : currentField
+          ? `settings:${currentField.id}`
+          : focusArea === "controls"
+            ? `controls:${focusedComposerControl}`
+            : focusArea;
+      const next = nextFocusStop(order, current, key.shift);
+      if (!next) return;
+      _renderer.currentFocusedRenderable?.blur();
+      if (next.startsWith("controls:")) {
+        setFocusedComposerControl(next.slice(9) as ComposerControl);
+        setFocusArea("controls");
+        _renderer.root.findDescendantById(`composer-control-${next.slice(9)}`)?.focus();
+      } else if (next.startsWith("settings:")) {
+        setFocusArea("settings");
+        const field = fields.find((candidate) => candidate.id === next.slice(9));
+        setTimeout(() => field?.focus(), 0);
+      } else {
+        setFocusArea(next as FocusArea);
+      }
+      logger.log("ui.focusMoved", { from: current, to: next });
+      return;
+    }
+    if (
+      focusArea === "controls" &&
+      !_renderer.currentFocusedRenderable?.id.startsWith("composer-control-") &&
+      !overlayMenu &&
+      !key.ctrl &&
+      !key.meta &&
+      ["return", "enter", "space"].includes(key.name)
+    ) {
+      key.preventDefault();
+      if (focusedComposerControl === "model") toggleModelMenu();
+      else if (focusedComposerControl === "traits") toggleTraitsMenu();
+      else if (focusedComposerControl === "interaction") toggleInteractionMode();
+      else if (focusedComposerControl === "runtime") toggleRuntimeMode();
+      else if (focusedComposerControl === "thread") openActiveThreadAppearanceMenu();
+      else if (focusedComposerControl === "env") toggleComposerEnvMenu();
+      else if (focusedComposerControl === "branch") toggleComposerBranchMenu();
+      else if (focusedComposerControl === "send" && !imagePasteInFlight) {
+        if (composerPrimaryAction === "stop") void interruptActiveTurn();
+        else if (composerHasSendableContent) void sendPrompt();
+      }
+      return;
     }
     if (
       focusArea === "timeline" &&
@@ -9679,11 +10151,18 @@ export function App({
     setProjectPathError(null);
   }
 
+  function assignDefaultThreadAppearance(threadId: string) {
+    setThreadAppearances((current) =>
+      current[threadId] ? current : { ...current, [threadId]: nextThreadAppearance(current) },
+    );
+  }
+
   function openDraftThread(projectId: string): string {
     persistComposerDraftForThread(activeThreadId, readComposerValue());
     const existingDraft =
       draftThreadsByProjectId[projectId] ??
       createDefaultDraftThreadState(projectId, defaultThreadEnvMode, currentBranch ?? null);
+    assignDefaultThreadAppearance(existingDraft.id);
     setDraftThreadsByProjectId((current) => ({
       ...current,
       [projectId]: existingDraft,
@@ -9720,6 +10199,15 @@ export function App({
       branch: threadContext?.branch ?? null,
       worktreePath: threadContext?.worktreePath ?? null,
       createdAt: nowIso(),
+    });
+    const draftId = draftThreadsByProjectId[projectId]?.id;
+    setThreadAppearances((current) => {
+      const next = {
+        ...current,
+        [threadId]: (draftId ? current[draftId] : undefined) ?? nextThreadAppearance(current),
+      };
+      if (draftId) delete next[draftId];
+      return next;
     });
     setSelectedProjectId(projectId);
     setSelectedThreadId(threadId);
@@ -10439,6 +10927,9 @@ export function App({
     setDraftProvider(nextProvider);
     setDraftProviderInstanceId(nextEntry.instanceId);
     setDraftModel(nextModel);
+    if (nextEntry.instanceId !== draftProviderInstanceId) {
+      setDraftProviderOptionSelections(undefined);
+    }
     setOverlayMenu(null);
     setFocusArea("composer");
     setStatus("model");
@@ -10491,6 +10982,7 @@ export function App({
       draftThreadsByProjectIdRef.current[projectId] ??
       createDefaultDraftThreadState(projectId, defaultThreadEnvMode);
     const next = updater(existing);
+    assignDefaultThreadAppearance(next.id);
     setDraftThreadsByProjectId((current) => ({
       ...current,
       [projectId]: next,
@@ -10777,6 +11269,14 @@ export function App({
       }
       return next;
     });
+  }
+
+  function openActiveThreadAppearanceMenu(event?: SidebarMouseEvent) {
+    if (!activeThreadId) return;
+    setAppearanceThreadId(activeThreadId);
+    openSettingsSelectMenu("thread-appearance", event);
+    setFocusedComposerControl("thread");
+    setFocusArea("controls");
   }
 
   function openSettingsSelectMenu(kind: SettingsSelectKind, event?: SidebarMouseEvent) {
@@ -11672,12 +12172,7 @@ export function App({
     ? visibleModelSearchResults.length
     : modelOptions.length;
   const modelMenuHeight = Math.min(Math.max(modelVisibleOptionCount, 1), 8);
-  const modelProvidersHeight =
-    2 +
-    modelMenuEntries.length +
-    (COMING_SOON_MODEL_PROVIDER_OPTIONS.length > 0
-      ? 1 + COMING_SOON_MODEL_PROVIDER_OPTIONS.length
-      : 0);
+  const modelProvidersHeight = 2 + modelMenuEntries.length;
   const modelPopupHeight = modelSubmenuOpen
     ? Math.max(modelMenuHeight + 3, modelProvidersHeight) + 2
     : modelProvidersHeight + 2;
@@ -11687,8 +12182,23 @@ export function App({
   useEffect(() => {
     setModelMenuIndex((current) => Math.min(current, Math.max(modelVisibleOptionCount - 1, 0)));
   }, [modelVisibleOptionCount]);
-  const settingsSelectMenuHeight = Math.min(Math.max(settingsSelectItems.length, 1), 6);
+  const viewportRows =
+    (process.stdout.rows ?? Number(process.env.T1CODE_HEADLESS_HEIGHT ?? 0)) || 48;
+  const settingsSelectMenuHeight = Math.min(
+    Math.max(settingsSelectItems.length, 1),
+    Math.max(1, Math.min(settingsSelectKind === "thread-color" ? 10 : 6, viewportRows - 5)),
+  );
   const settingsSelectPopupHeight = 3 + settingsSelectMenuHeight;
+  useEffect(() => {
+    if (overlayMenu !== "settings-select") return;
+    const scrollbox = settingsSelectScrollRef.current;
+    if (!scrollbox) return;
+    if (settingsSelectIndex < scrollbox.scrollTop) {
+      scrollbox.scrollTo({ x: 0, y: settingsSelectIndex });
+    } else if (settingsSelectIndex >= scrollbox.scrollTop + settingsSelectMenuHeight) {
+      scrollbox.scrollTo({ x: 0, y: settingsSelectIndex - settingsSelectMenuHeight + 1 });
+    }
+  }, [overlayMenu, settingsSelectKind, settingsSelectIndex, settingsSelectMenuHeight]);
   const composerEnvPopupWidth = Math.max(
     16,
     composerEnvMenuItems.reduce((width, item) => Math.max(width, item.label.length + 8), 16),
@@ -11715,23 +12225,29 @@ export function App({
   );
   const gitPopupHeight = Math.max(gitMenuItems.length, 1) + 3;
   const settingsSelectTitle =
-    settingsSelectKind === "theme"
-      ? "Theme"
-      : settingsSelectKind === "theme-preset"
-        ? "Theme preset"
-        : settingsSelectKind === "timestamp-format"
-          ? "Time format"
-          : settingsSelectKind === "thread-env"
-            ? "New threads"
-            : settingsSelectKind === "git-fetch-interval"
-              ? "Fetch interval"
-              : settingsSelectKind === "custom-model-provider"
-                ? "Custom model provider"
-                : settingsSelectKind === "git-model-provider"
-                  ? "Text generation provider"
-                  : settingsSelectKind === "model-preferences-provider"
-                    ? "Model preferences"
-                    : "Text generation model";
+    settingsSelectKind === "thread-appearance"
+      ? "Thread"
+      : settingsSelectKind === "thread-color"
+        ? "Thread sidebar color"
+        : settingsSelectKind === "thread-tone"
+          ? "Thread sidebar tone"
+          : settingsSelectKind === "theme"
+            ? "Theme"
+            : settingsSelectKind === "theme-preset"
+              ? "Theme preset"
+              : settingsSelectKind === "timestamp-format"
+                ? "Time format"
+                : settingsSelectKind === "thread-env"
+                  ? "New threads"
+                  : settingsSelectKind === "git-fetch-interval"
+                    ? "Fetch interval"
+                    : settingsSelectKind === "custom-model-provider"
+                      ? "Custom model provider"
+                      : settingsSelectKind === "git-model-provider"
+                        ? "Text generation provider"
+                        : settingsSelectKind === "model-preferences-provider"
+                          ? "Model preferences"
+                          : "Text generation model";
   const settingsSelectPopupWidth = Math.max(
     14,
     settingsSelectItems.reduce(
@@ -11759,14 +12275,16 @@ export function App({
       : sidebarContextMenu.kind === "multi-thread"
         ? buildMultiSelectContextMenuItems({
             count: sidebarContextMenu.threadIds.length,
+            supportsSettlement,
+            settled: sidebarContextMenu.threadIds.every((id) =>
+              isThreadSettled(allThreads.find((thread) => thread.id === id)),
+            ),
             archived: sidebarContextMenu.threadIds.some((threadId) =>
               archivedThreads.some((thread) => thread.id === threadId),
             ),
           })
         : buildProjectContextMenuItems()
     : [];
-  const viewportRows =
-    (process.stdout.rows ?? Number(process.env.T1CODE_HEADLESS_HEIGHT ?? 0)) || 48;
   const viewportColumns =
     (process.stdout.columns ?? Number(process.env.T1CODE_HEADLESS_WIDTH ?? 0)) || 160;
   const commandPaletteWidth = Math.min(Math.max(54, Math.floor(viewportColumns * 0.58)), 72);
@@ -11955,7 +12473,118 @@ export function App({
     terminalImageSupport,
   ]);
 
+  function renderSidebarThreadRow(
+    thread: ThreadReadModel,
+    projectId: string,
+    orderedProjectThreadIds: readonly string[],
+  ) {
+    const status = threadStatus(thread, {
+      forceUnread: locallyUnreadThreadIds.has(thread.id),
+      locallyVisitedAt: locallyVisitedThreads[thread.id],
+    });
+    const isActive = thread.id === activeThreadId;
+    const isSelected = selectedThreadIds.has(thread.id);
+    const unread = locallyUnreadThreadIds.has(thread.id);
+    const savedAppearance = threadAppearances[thread.id];
+    const appearance = resolveThreadAppearance(
+      unread && (!savedAppearance || savedAppearance.color === "default")
+        ? { color: "blue", tone: savedAppearance?.tone ?? "subtle" }
+        : savedAppearance,
+      activeTheme.mode,
+      baseTheme.palette.sidebar,
+      unread ? sidebarPulseTick : undefined,
+    );
+    return (
+      <SidebarRow
+        key={thread.id}
+        active={isActive}
+        selected={isSelected}
+        activeBackgroundColor={appearance?.activeBackground ?? PALETTE.controlActiveStrong}
+        backgroundColor={appearance?.background}
+        hoverBackgroundColor={unread ? appearance?.background : appearance?.activeBackground}
+        compact
+        onPress={(event) => {
+          closeSidebarContextMenu();
+          handleThreadClick(event, projectId, thread.id, orderedProjectThreadIds);
+        }}
+        onSecondaryPress={(event) => {
+          openThreadContextMenu(projectId, thread.id, event);
+        }}
+      >
+        <box
+          style={{
+            width: 1,
+            marginRight: 1,
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
+          }}
+        >
+          {status || unread || isThreadSettled(thread) ? (
+            <text
+              content={isThreadSettled(thread) ? "✓" : "●"}
+              style={{
+                fg: unread
+                  ? appearance
+                    ? readableThreadText(appearance.accent, [
+                        appearance.background,
+                        appearance.activeBackground,
+                      ])
+                    : PALETTE.accent
+                  : status
+                    ? resolveThreadStatusDotColor(status, sidebarPulseTick)
+                    : PALETTE.subtle,
+                flexShrink: 0,
+              }}
+            />
+          ) : null}
+        </box>
+        <box
+          style={{
+            width: SIDEBAR_THREAD_TITLE_WIDTH - (TUI_SIDEBAR_WIDTH - (responsiveLayout.showSidebar ? responsiveLayout.sidebarWidth : TUI_SIDEBAR_WIDTH)),
+            flexShrink: 0,
+            overflow: "hidden",
+            height: 1,
+          }}
+        >
+          <text
+            content={truncateTitleForDisplay(
+              thread.title,
+              SIDEBAR_THREAD_TITLE_WIDTH -
+                (TUI_SIDEBAR_WIDTH -
+                  (responsiveLayout.showSidebar ? responsiveLayout.sidebarWidth : TUI_SIDEBAR_WIDTH)),
+            )}
+            style={{
+              fg: isSelected
+                ? ACTIVE_TUI_THEME.colors.selectedText
+                : (appearance?.foreground ?? (isActive ? PALETTE.text : PALETTE.muted)),
+            }}
+          />
+        </box>
+        <box
+          style={{
+            width: SIDEBAR_THREAD_TIMESTAMP_WIDTH,
+            marginLeft: SIDEBAR_THREAD_TIMESTAMP_GAP,
+            flexShrink: 0,
+            justifyContent: "flex-end",
+          }}
+        >
+          <text
+            content={formatRelativeTime(thread.updatedAt)}
+            style={{
+              fg: isSelected
+                ? ACTIVE_TUI_THEME.colors.selectedText
+                : (appearance?.foreground ?? (isActive ? PALETTE.muted : PALETTE.subtle)),
+              flexShrink: 0,
+            }}
+          />
+        </box>
+      </SidebarRow>
+    );
+  }
+
   const sidebarBg = PALETTE.sidebar;
+  const conversationBackground = PALETTE.main;
   return (
     <box
       onMouseDown={() => {
@@ -12039,7 +12668,7 @@ export function App({
                   fg: PALETTE.text,
                 }}
               />
-              {responsiveLayout.showSidebarAlphaBadge ? <Badge label="ALPHA" /> : null}
+              {responsiveLayout.showSidebarAlphaBadge ? <Badge label="FORK" /> : null}
             </box>
           </box>
 
@@ -12098,14 +12727,21 @@ export function App({
             ) : null}
 
             {sortedProjects.map((project) => {
-              const projectThreads = threadsByProject.get(project.id) ?? [];
+              const allProjectThreads = threadsByProject.get(project.id) ?? [];
+              const { active: projectThreads, settled: settledProjectThreads } =
+                groupThreadSettlement(allProjectThreads);
+              const showSettled =
+                expandedSettledProjectIds.has(project.id) ||
+                settledProjectThreads.some((thread) => thread.id === activeThreadId);
               const showAllThreadsForProject = showAllProjectThreads.has(project.id);
               const hasOverflowingThreads = projectThreads.length > sidebarThreadPreviewCount;
               const visibleProjectThreads =
                 showAllThreadsForProject || !hasOverflowingThreads
                   ? projectThreads
                   : projectThreads.slice(0, sidebarThreadPreviewCount);
-              const orderedProjectThreadIds = projectThreads.map((thread) => thread.id);
+              const orderedProjectThreadIds = [...projectThreads, ...settledProjectThreads].map(
+                (thread) => thread.id,
+              );
               const isProjectExpanded = expandedProjectIds.has(project.id);
               const isProjectActive = project.id === activeProjectId;
               const projectStatus = resolveProjectStatusIndicator(
@@ -12192,97 +12828,9 @@ export function App({
                     >
                       {projectThreads.length > 0 ? (
                         <>
-                          {visibleProjectThreads.map((thread) => {
-                            const status = threadStatus(thread, {
-                              forceUnread: locallyUnreadThreadIds.has(thread.id),
-                              locallyVisitedAt: locallyVisitedThreads[thread.id],
-                            });
-                            const isActive = thread.id === activeThreadId;
-                            const isSelected = selectedThreadIds.has(thread.id);
-                            return (
-                              <SidebarRow
-                                key={thread.id}
-                                active={isActive}
-                                selected={isSelected}
-                                activeBackgroundColor={PALETTE.controlActiveStrong}
-                                compact
-                                onPress={(event) => {
-                                  closeSidebarContextMenu();
-                                  handleThreadClick(
-                                    event,
-                                    project.id,
-                                    thread.id,
-                                    orderedProjectThreadIds,
-                                  );
-                                }}
-                                onSecondaryPress={(event) => {
-                                  openThreadContextMenu(project.id, thread.id, event);
-                                }}
-                              >
-                                <box
-                                  style={{
-                                    width: 1,
-                                    marginRight: 1,
-                                    alignItems: "center",
-                                    justifyContent: "center",
-                                    flexShrink: 0,
-                                  }}
-                                >
-                                  {status ? (
-                                    <text
-                                      content="●"
-                                      style={{
-                                        fg: resolveThreadStatusDotColor(status, sidebarPulseTick),
-                                        flexShrink: 0,
-                                      }}
-                                    />
-                                  ) : null}
-                                </box>
-                                <box
-                                  style={{
-                                    width: SIDEBAR_THREAD_TITLE_WIDTH,
-                                    flexShrink: 0,
-                                    overflow: "hidden",
-                                    height: 1,
-                                  }}
-                                >
-                                  <text
-                                    content={truncateTitleForDisplay(
-                                      thread.title,
-                                      SIDEBAR_THREAD_TITLE_WIDTH,
-                                    )}
-                                    style={{
-                                      fg: isSelected
-                                        ? ACTIVE_TUI_THEME.colors.selectedText
-                                        : isActive
-                                          ? PALETTE.text
-                                          : PALETTE.muted,
-                                    }}
-                                  />
-                                </box>
-                                <box
-                                  style={{
-                                    width: SIDEBAR_THREAD_TIMESTAMP_WIDTH,
-                                    marginLeft: SIDEBAR_THREAD_TIMESTAMP_GAP,
-                                    flexShrink: 0,
-                                    justifyContent: "flex-end",
-                                  }}
-                                >
-                                  <text
-                                    content={formatRelativeTime(thread.updatedAt)}
-                                    style={{
-                                      fg: isSelected
-                                        ? ACTIVE_TUI_THEME.colors.selectedText
-                                        : isActive
-                                          ? PALETTE.muted
-                                          : PALETTE.subtle,
-                                      flexShrink: 0,
-                                    }}
-                                  />
-                                </box>
-                              </SidebarRow>
-                            );
-                          })}
+                          {visibleProjectThreads.map((thread) =>
+                            renderSidebarThreadRow(thread, project.id, orderedProjectThreadIds),
+                          )}
                           {hasOverflowingThreads ? (
                             <SidebarRow
                               compact
@@ -12309,9 +12857,42 @@ export function App({
                             paddingBottom: 0,
                           }}
                         >
-                          <text content="No threads yet" style={{ fg: PALETTE.subtle }} />
+                          <text
+                            content={
+                              settledProjectThreads.length > 0
+                                ? "No active threads"
+                                : "No threads yet"
+                            }
+                            style={{ fg: PALETTE.subtle }}
+                          />
                         </box>
                       )}
+                      {settledProjectThreads.length > 0 ? (
+                        <>
+                          <SidebarRow
+                            compact
+                            suppressHighlight
+                            onPress={() =>
+                              setExpandedSettledProjectIds((current) => {
+                                const next = new Set(current);
+                                if (next.has(project.id)) next.delete(project.id);
+                                else next.add(project.id);
+                                return next;
+                              })
+                            }
+                          >
+                            <text
+                              content={`${showSettled ? "▾" : "▸"} Settled (${settledProjectThreads.length})`}
+                              style={{ fg: PALETTE.muted }}
+                            />
+                          </SidebarRow>
+                          {showSettled
+                            ? settledProjectThreads.map((thread) =>
+                                renderSidebarThreadRow(thread, project.id, orderedProjectThreadIds),
+                              )
+                            : null}
+                        </>
+                      ) : null}
                     </box>
                   ) : null}
                 </box>
@@ -12366,7 +12947,7 @@ export function App({
         style={{
           flexDirection: "column",
           flexGrow: 1,
-          backgroundColor: PALETTE.main,
+          backgroundColor: conversationBackground,
         }}
       >
         <box
@@ -12378,7 +12959,7 @@ export function App({
             paddingRight: 0,
             paddingTop: 1,
             paddingBottom: 1,
-            backgroundColor: PALETTE.main,
+            backgroundColor: conversationBackground,
             border: ["bottom"],
             borderColor: PALETTE.divider,
           }}
@@ -12501,6 +13082,7 @@ export function App({
 
             {mainView !== "thread" ? (
               <scrollbox
+                id="settings-navigation"
                 focused={focusArea === "settings"}
                 style={{
                   flexGrow: 1,
@@ -14176,32 +14758,6 @@ export function App({
                                 </box>
                               );
                             })}
-                            {COMING_SOON_INSTALL_PROVIDER_OPTIONS.map((providerOption) => (
-                              <box
-                                key={`provider-install-soon:${String(providerOption.provider)}`}
-                                style={{
-                                  flexDirection: "row",
-                                  alignItems: "center",
-                                  justifyContent: "space-between",
-                                  backgroundColor: PALETTE.surfaceAlt,
-                                  paddingLeft: 1,
-                                  paddingRight: 1,
-                                  marginBottom: 1,
-                                }}
-                              >
-                                <box style={{ flexDirection: "row", alignItems: "center" }}>
-                                  <text
-                                    content={providerPickerIcon(String(providerOption.provider))}
-                                    style={{ fg: PALETTE.subtle, marginRight: 1 }}
-                                  />
-                                  <text
-                                    content={providerOption.title}
-                                    style={{ fg: PALETTE.subtle, marginRight: 1 }}
-                                  />
-                                </box>
-                                <text content="Soon" style={{ fg: PALETTE.subtle }} />
-                              </box>
-                            ))}
                           </SettingsRow>
                         </SettingsSection>
                       ) : null}
@@ -15226,7 +15782,7 @@ export function App({
                     flexGrow: 1,
                     flexShrink: 1,
                     minHeight: 0,
-                    ...themedScrollboxStyle(PALETTE.main),
+                    ...themedScrollboxStyle(conversationBackground),
                     paddingRight: 1,
                   }}
                 >
@@ -15316,8 +15872,9 @@ export function App({
                                   width: "auto",
                                   maxWidth: "100%",
                                   minWidth: 0,
-                                  paddingTop: 0,
-                                  paddingBottom: 0,
+                                  backgroundColor: PALETTE.surfaceUser,
+                                  paddingTop: 1,
+                                  paddingBottom: 1,
                                   paddingLeft: 1,
                                   paddingRight: 1,
                                   flexDirection: "column",
@@ -15562,6 +16119,12 @@ export function App({
                         {renderAnimatedSendDots(sendAnimationTick).map((dot) => (
                           <text key={dot.key} content={dot.character} style={{ fg: dot.color }} />
                         ))}
+                        {lmdeckLoad ? (
+                          <text
+                            content={`  ${formatLmdeckLoad(lmdeckLoad)}`}
+                            style={{ fg: PALETTE.muted }}
+                          />
+                        ) : null}
                       </box>
                     </box>
                   ) : null}
@@ -16012,6 +16575,7 @@ export function App({
                         focused={composerIsFocused}
                         initialValue={composer}
                         onKeyDown={(key) => {
+                          if (key.defaultPrevented) return;
                           if (imagePasteInFlight || activePendingApproval) {
                             key.preventDefault();
                             return;
@@ -16261,7 +16825,12 @@ export function App({
                           }}
                         >
                           <ToolbarButton
-                            icon={providerIcon(draftProvider)}
+                            control="model"
+                            focused={focusArea === "controls" && focusedComposerControl === "model"}
+                            icon={providerIcon(
+                              modelMenuEntryByInstanceId.get(draftProviderInstanceId)?.driverKind ??
+                                draftProvider,
+                            )}
                             iconColor={providerColor(draftProvider)}
                             label={
                               responsiveLayout.showComposerModelLabel
@@ -16280,6 +16849,10 @@ export function App({
                             <>
                               {responsiveLayout.showComposerDividers ? <FooterDivider /> : null}
                               <ToolbarButton
+                                control="traits"
+                                focused={
+                                  focusArea === "controls" && focusedComposerControl === "traits"
+                                }
                                 icon={composerTraitsIcon(draftProvider)}
                                 label={
                                   responsiveLayout.showComposerTraitsLabel
@@ -16303,6 +16876,10 @@ export function App({
                           ) : null}
                           {responsiveLayout.showComposerDividers ? <FooterDivider /> : null}
                           <ToolbarButton
+                            control="interaction"
+                            focused={
+                              focusArea === "controls" && focusedComposerControl === "interaction"
+                            }
                             icon={interactionIcon(draftInteractionMode)}
                             label={
                               responsiveLayout.showComposerModeLabels
@@ -16315,6 +16892,10 @@ export function App({
                           />
                           {responsiveLayout.showComposerDividers ? <FooterDivider /> : null}
                           <ToolbarButton
+                            control="runtime"
+                            focused={
+                              focusArea === "controls" && focusedComposerControl === "runtime"
+                            }
                             icon={runtimeFooterIcon(draftRuntimeMode)}
                             label={
                               responsiveLayout.showComposerModeLabels
@@ -16325,6 +16906,54 @@ export function App({
                             active={draftRuntimeMode === "approval-required"}
                             onPress={toggleRuntimeMode}
                           />
+                          {responsiveLayout.showComposerDividers ? <FooterDivider /> : null}
+                          <ToolbarButton
+                            control="thread"
+                            focused={
+                              focusArea === "controls" && focusedComposerControl === "thread"
+                            }
+                            icon="●"
+                            iconColor={
+                              resolveThreadAppearance(
+                                threadAppearances[activeThreadId ?? ""],
+                                activeTheme.mode,
+                                PALETTE.sidebar,
+                              )?.accent ?? PALETTE.muted
+                            }
+                            label={responsiveLayout.showComposerModeLabels ? "Thread" : undefined}
+                            compact={!responsiveLayout.showComposerModeLabels}
+                            disabled={!activeThreadId}
+                            active={
+                              overlayMenu === "settings-select" &&
+                              settingsSelectKind.startsWith("thread-")
+                            }
+                            onPress={openActiveThreadAppearanceMenu}
+                          />
+                          {activeProviderUsageWindows.length > 0 ? (
+                            <box
+                              style={{
+                                flexDirection: "row",
+                                alignItems: "center",
+                                gap: 1,
+                                marginRight: 1,
+                              }}
+                            >
+                              {activeProviderUsageWindows.map((window) => (
+                                <text
+                                  key={window.id}
+                                  content={`${window.label} ${Math.round(window.usedPercent)}%`}
+                                  style={{
+                                    fg:
+                                      window.usedPercent >= 90
+                                        ? PALETTE.composerStop
+                                        : window.usedPercent >= 75
+                                          ? PALETTE.warning
+                                          : PALETTE.muted,
+                                  }}
+                                />
+                              ))}
+                            </box>
+                          ) : null}
                         </box>
                         {activePendingProgress ? (
                           <>
@@ -16363,6 +16992,7 @@ export function App({
                           </>
                         ) : (
                           <ComposerSendButton
+                            focused={focusArea === "controls" && focusedComposerControl === "send"}
                             icon={composerPrimaryAction === "stop" ? "■" : "↑"}
                             variant={composerPrimaryAction}
                             disabled={
@@ -16410,6 +17040,8 @@ export function App({
                         }}
                       >
                         <ToolbarButton
+                          control="env"
+                          focused={focusArea === "controls" && focusedComposerControl === "env"}
                           icon={effectiveThreadEnvMode === "worktree" ? "󰙅" : "󰉋"}
                           label={effectiveThreadEnvMode === "worktree" ? "New worktree" : "Local"}
                           compact
@@ -16430,6 +17062,8 @@ export function App({
                       >
                         <ToolbarButton
                           icon="󰘬"
+                          control="branch"
+                          focused={focusArea === "controls" && focusedComposerControl === "branch"}
                           label={truncateToolbarLabel(composerBranchLabel, 20)}
                           compact
                           chrome="bare"
@@ -16720,20 +17354,6 @@ export function App({
                 onPress={() => focusModelProvider(entry.instanceId)}
               />
             ))}
-            {COMING_SOON_MODEL_PROVIDER_OPTIONS.length > 0 ? (
-              <>
-                {COMING_SOON_MODEL_PROVIDER_OPTIONS.map((option) => (
-                  <PopupRow
-                    key={`provider-soon:${option.id}`}
-                    icon={providerPickerIcon(option.id)}
-                    label={option.label}
-                    disabled
-                    trailingLabel="Soon"
-                    onPress={() => {}}
-                  />
-                ))}
-              </>
-            ) : null}
           </box>
           {modelSubmenuOpen ? (
             <box style={{ flexGrow: 1, flexDirection: "column", paddingLeft: 1 }}>
@@ -16763,6 +17383,11 @@ export function App({
                 ) : (
                   <text content="No matching models." style={{ fg: PALETTE.muted }} />
                 )
+              ) : modelOptions.length === 0 ? (
+                <text
+                  content="No models reported by this provider."
+                  style={{ fg: PALETTE.muted }}
+                />
               ) : (
                 modelOptions
                   .slice(0, modelMenuHeight)
@@ -16893,16 +17518,26 @@ export function App({
           }}
         >
           <text content={settingsSelectTitle} style={{ fg: PALETTE.subtle, marginBottom: 1 }} />
-          {settingsSelectItems.slice(0, settingsSelectMenuHeight).map((option, index) => (
-            <PopupRow
-              key={`settings-select:${settingsSelectKind}:${option.id}`}
-              icon={option.selected ? "󰄬" : " "}
-              label={option.label}
-              active={index === settingsSelectIndex}
-              onHover={() => setSettingsSelectIndex(index)}
-              onPress={option.onSelect}
-            />
-          ))}
+          <scrollbox
+            ref={settingsSelectScrollRef}
+            style={{
+              height: settingsSelectMenuHeight,
+              minHeight: settingsSelectMenuHeight,
+              ...themedScrollboxStyle(PALETTE.popup),
+            }}
+          >
+            {settingsSelectItems.map((option, index) => (
+              <PopupRow
+                key={`settings-select:${settingsSelectKind}:${option.id}`}
+                icon={option.selected ? "󰄬" : "iconColor" in option ? "●" : " "}
+                iconColor={"iconColor" in option ? option.iconColor : PALETTE.muted}
+                label={option.label}
+                active={index === settingsSelectIndex}
+                onHover={() => setSettingsSelectIndex(index)}
+                onPress={option.onSelect}
+              />
+            ))}
+          </scrollbox>
         </box>
       ) : null}
 

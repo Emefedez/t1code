@@ -14,6 +14,10 @@ export const KEYBINDING_GUIDE_SECTIONS: readonly KeybindingGuideSection[] = [
     title: "Global",
     items: [
       {
+        shortcut: "Tab / Shift+Tab",
+        action: "Move focus forward or backward through visible panes and controls",
+      },
+      {
         shortcut: "Ctrl+C",
         action: "Open the quit prompt; press Ctrl+C again to confirm exit",
       },
@@ -33,6 +37,10 @@ export const KEYBINDING_GUIDE_SECTIONS: readonly KeybindingGuideSection[] = [
       {
         shortcut: "Ctrl+P",
         action: "Open the add-project prompt",
+      },
+      {
+        shortcut: "Ctrl+Shift+S",
+        action: "Settle or reopen the current thread (T3 backend)",
       },
       {
         shortcut: "Ctrl+N",

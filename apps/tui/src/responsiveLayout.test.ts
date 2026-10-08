@@ -56,7 +56,7 @@ describe("resolveTuiResponsiveLayout", () => {
   it("forces the sidebar closed in very narrow terminals", () => {
     expect(
       resolveTuiResponsiveLayout({
-        viewportColumns: 78,
+        viewportColumns: 66,
         sidebarCollapsedPreference: false,
       }),
     ).toEqual(
@@ -69,7 +69,18 @@ describe("resolveTuiResponsiveLayout", () => {
         showWindowDots: false,
         showComposerModeLabels: true,
         showComposerModelLabel: true,
-        showComposerTraitsLabel: true,
+        showComposerTraitsLabel: false,
+      }),
+    );
+  });
+
+  it("shrinks the sidebar and drops composer labels in side-panel widths", () => {
+    expect(resolveTuiResponsiveLayout({ viewportColumns: 82, sidebarCollapsedPreference: false })).toEqual(
+      expect.objectContaining({
+        sidebarWidth: 25,
+        showSidebar: true,
+        showComposerModeLabels: false,
+        showComposerModelLabel: false,
       }),
     );
   });
@@ -82,7 +93,7 @@ describe("resolveTuiResponsiveLayout", () => {
       }),
     ).toEqual(
       expect.objectContaining({
-        showSidebarToggle: true,
+        showSidebarToggle: false,
         sidebarForcedCollapsed: false,
         sidebarCollapsed: false,
         showSidebar: true,
@@ -114,7 +125,7 @@ describe("resolveTuiResponsiveLayout", () => {
   it("collapses the traits label before the other footer labels in tighter widths", () => {
     expect(
       resolveTuiResponsiveLayout({
-        viewportColumns: 104,
+        viewportColumns: 100,
         sidebarCollapsedPreference: false,
       }),
     ).toEqual(

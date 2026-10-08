@@ -10,6 +10,7 @@ import {
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { TuiPaths } from "./config";
+import type { ThreadAppearance } from "./threadAppearance";
 import type { TuiThemeId } from "./theme";
 
 export interface PersistedComposerImageAttachment {
@@ -43,6 +44,7 @@ export interface PersistedDraftThreadState {
 }
 
 export interface TuiPrefs {
+  readonly threadAppearances?: Readonly<Record<string, ThreadAppearance>>;
   readonly tuiThemeId?: TuiThemeId;
   readonly selectedProjectId?: string;
   readonly selectedThreadId?: string;

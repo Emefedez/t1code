@@ -146,7 +146,18 @@ export function getProviderInstanceModels(
   providers: ReadonlyArray<ServerProvider>,
   instanceId: ProviderInstanceId,
 ): ReadonlyArray<ServerProviderModel> {
-  return getProviderInstanceEntry(providers, instanceId)?.models ?? [];
+  const entry = getProviderInstanceEntry(providers, instanceId);
+  const models = entry?.models ?? [];
+  // LMDeck uses Claude's transport, but the inherited Claude catalog does not
+  // describe its local endpoint. T3 reports the configured local models as custom.
+  return isLmdeckInstance(entry?.snapshot) ? models.filter((model) => model.isCustom) : models;
+}
+
+function isLmdeckInstance(snapshot: ServerProvider | undefined): boolean {
+  return (
+    snapshot?.instanceId.toLowerCase() === "lmdeck" ||
+    snapshot?.displayName?.trim().toLowerCase() === "lmdeck"
+  );
 }
 
 export function getProviderInstanceModelOptions(
@@ -155,7 +166,10 @@ export function getProviderInstanceModelOptions(
   fallbackOptions: ReadonlyArray<ProviderInstanceModelOption>,
 ): ReadonlyArray<ProviderInstanceModelOption> {
   const instanceModels = getProviderInstanceModels(providers, instanceId);
-  if (instanceModels.length === 0) return fallbackOptions;
+  const isLmdeck = isLmdeckInstance(
+    providers.find((provider) => provider.instanceId === instanceId),
+  );
+  if (instanceModels.length === 0) return isLmdeck ? [] : fallbackOptions;
 
   const options: ProviderInstanceModelOption[] = instanceModels.map((model) => {
     const option: ProviderInstanceModelOption = {
@@ -172,6 +186,7 @@ export function getProviderInstanceModelOptions(
     return option;
   });
   const seen = new Set(options.map((option) => option.slug));
+  if (isLmdeck) return options;
   for (const option of fallbackOptions) {
     if (!option.isCustom || seen.has(option.slug)) {
       continue;

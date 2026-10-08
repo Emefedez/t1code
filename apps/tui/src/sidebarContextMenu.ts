@@ -1,6 +1,10 @@
 import type { OrchestrationReadModel } from "@t3tools/contracts";
 
 export type SidebarContextMenuActionId =
+  | "thread-color"
+  | "thread-tone"
+  | "settle"
+  | "unsettle"
   | "rename"
   | "mark-unread"
   | "open-editor"
@@ -31,10 +35,19 @@ export type ProjectRemovalConfirmStep = {
 type ThreadReadModel = OrchestrationReadModel["threads"][number];
 
 export function buildThreadContextMenuItems(
-  input: { archived?: boolean } = {},
+  input: { archived?: boolean; supportsSettlement?: boolean; settled?: boolean } = {},
 ): readonly SidebarContextMenuItem[] {
   return [
     { id: "rename", label: "Rename thread" },
+    { id: "thread-color", label: "Sidebar color" },
+    { id: "thread-tone", label: "Sidebar tone" },
+    ...(input.supportsSettlement
+      ? [
+          input.settled
+            ? { id: "unsettle" as const, label: "Reopen thread" }
+            : { id: "settle" as const, label: "Mark settled" },
+        ]
+      : []),
     { id: "mark-unread", label: "Mark unread" },
     { id: "open-editor", label: "Open in Editor" },
     { id: "open-folder", label: "Open Folder" },
@@ -86,8 +99,17 @@ export function buildProjectRemovalConfirmSteps(
 export function buildMultiSelectContextMenuItems(input: {
   count: number;
   archived?: boolean;
+  supportsSettlement?: boolean;
+  settled?: boolean;
 }): readonly SidebarContextMenuItem[] {
   return [
+    ...(input.supportsSettlement
+      ? [
+          input.settled
+            ? { id: "unsettle" as const, label: `Reopen threads (${input.count})` }
+            : { id: "settle" as const, label: `Mark settled (${input.count})` },
+        ]
+      : []),
     { id: "mark-unread", label: `Mark unread (${input.count})` },
     input.archived === true
       ? { id: "unarchive", label: `Unarchive (${input.count})` }

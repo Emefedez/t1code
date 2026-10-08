@@ -1,0 +1,140 @@
+{
+  "name": "t1code",
+  "displayName": "T1 Code",
+  "version": "0.1.2",
+  "private": true,
+  "description": "The T1 terminal frontend for your real T3 Code backend, inside VS Code.",
+  "categories": [
+    "Other"
+  ],
+  "license": "MIT",
+  "publisher": "local-t1",
+  "main": "./dist/extension.cjs",
+  "scripts": {
+    "build": "bun build src/extension.ts --target node --format cjs --external vscode --outfile dist/extension.cjs",
+    "typecheck": "tsgo --noEmit",
+    "test": "vitest run",
+    "vscode:prepublish": "bun run build",
+    "package": "vsce package --no-dependencies --allow-missing-repository --out ../../artifacts/t1code-0.1.2.vsix"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@types/vscode": "^1.94.0",
+    "@typescript/native-preview": "catalog:",
+    "@vscode/vsce": "^3.6.2",
+    "vitest": "catalog:"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "t1code.open",
+        "title": "Open or Focus",
+        "category": "T1 Code",
+        "icon": {
+          "light": "images/t1-light.svg",
+          "dark": "images/t1-dark.svg"
+        }
+      },
+      {
+        "command": "t1code.openNew",
+        "title": "Open New Session",
+        "category": "T1 Code",
+        "icon": {
+          "light": "images/t1-light.svg",
+          "dark": "images/t1-dark.svg"
+        }
+      },
+      {
+        "command": "t1code.addFile",
+        "title": "Add File Reference",
+        "category": "T1 Code"
+      },
+      {
+        "command": "t1code.addSelection",
+        "title": "Add Selection to Prompt",
+        "category": "T1 Code"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "t1code.open",
+          "group": "navigation@0.1",
+          "when": "resourceScheme == file"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "t1code.addFile",
+          "group": "t1code@1",
+          "when": "resourceScheme == file"
+        },
+        {
+          "command": "t1code.addSelection",
+          "group": "t1code@2",
+          "when": "editorHasSelection && resourceScheme == file"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "t1code.addFile",
+          "group": "t1code@1",
+          "when": "resourceScheme == file"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "t1code.open",
+        "key": "ctrl+alt+t",
+        "mac": "cmd+alt+t"
+      },
+      {
+        "command": "t1code.openNew",
+        "key": "ctrl+alt+shift+t",
+        "mac": "cmd+alt+shift+t"
+      },
+      {
+        "command": "t1code.addSelection",
+        "key": "ctrl+alt+shift+k",
+        "mac": "cmd+alt+shift+k",
+        "when": "editorHasSelection"
+      }
+    ],
+    "configuration": {
+      "title": "T1 Code",
+      "properties": {
+        "t1code.executablePath": {
+          "type": "string",
+          "default": "~/.local/bin/t1",
+          "scope": "machine",
+          "description": "Path to the T1 launcher connected to your T3 backend."
+        },
+        "t1code.terminalLocation": {
+          "type": "string",
+          "enum": [
+            "editor",
+            "panel"
+          ],
+          "default": "editor",
+          "description": "Open T1 beside the editor or in the terminal panel."
+        }
+      }
+    }
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "icon": "images/icon.png",
+  "engines": {
+    "vscode": "^1.94.0"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    },
+    "virtualWorkspaces": {
+      "supported": false
+    }
+  }
+}

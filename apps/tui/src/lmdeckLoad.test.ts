@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { formatLmdeckLoad, parseLmdeckLoad } from "./lmdeckLoad";
 
 describe("lmdeckLoad", () => {
-  it("ignores status without a load in flight", () => {
-    expect(parseLmdeckLoad({ load: null })).toBeNull();
+  it("ignores an idle daemon", () => {
+    expect(parseLmdeckLoad({ load: null, running: [{ name: "m", work: null }] })).toBeNull();
     expect(parseLmdeckLoad(null)).toBeNull();
   });
 
@@ -16,10 +16,18 @@ describe("lmdeckLoad", () => {
     );
   });
 
-  it("formats warm-up tokens", () => {
+  it("formats prompt reading after the model is loaded", () => {
     const load = parseLmdeckLoad({
-      load: { model: "m", phase: "warming up", progress: 0.95, elapsed_secs: 30, eta_secs: null, warmup: [3, 53] },
+      load: null,
+      running: [{ name: "mlx-community/Qwen3.8-27B-4bit", work: { phase: "reading prompt", prompt_done: 2048, prompt_tokens: 8192, tokens_per_sec: 68.2, eta_secs: 90.1, elapsed_secs: 30 } }],
     });
-    expect(load && formatLmdeckLoad(load)).toContain("warming up 3/53 tokens");
+    expect(load && formatLmdeckLoad(load, 8)).toBe(
+      "Reading prompt  ██░░░░░░ 2048/8192 · 68 tok/s · ~90s left · Qwen3.8-27B-4bit",
+    );
+  });
+
+  it("formats generating", () => {
+    const load = parseLmdeckLoad({ running: [{ name: "m", work: { phase: "generating", prompt_tokens: 10, elapsed_secs: 42 } }] });
+    expect(load && formatLmdeckLoad(load)).toBe("Generating · m · 42s");
   });
 });

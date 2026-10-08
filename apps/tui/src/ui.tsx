@@ -16121,7 +16121,7 @@ export function App({
                         ))}
                         {lmdeckLoad ? (
                           <text
-                            content={`  ${formatLmdeckLoad(lmdeckLoad)}`}
+                            content={`  ${formatLmdeckLoad(lmdeckLoad, totalColumns < 100 ? 10 : 20)}`}
                             style={{ fg: PALETTE.muted }}
                           />
                         ) : null}

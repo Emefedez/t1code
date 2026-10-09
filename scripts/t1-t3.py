@@ -74,4 +74,32 @@ if not token:
 launch_env = dict(os.environ, T1CODE_T3_ORIGIN=ORIGIN, T1CODE_T3_TOKEN=token,
                   T1CODE_CONFIG_HOME=str(TASK_HOME / ".config/t1code/t3-frontend"),
                   T1CODE_STATE_HOME=str(TASK_HOME / ".local/state/t1code/t3-frontend"))
-os.execvpe("bun", ["bun", str(REPO / "apps/tui/dist/index.mjs"), *sys.argv[1:]], launch_env)
+# Run the TUI as a child (not exec) so that, once it quits, we can offer to stop
+# the backend it was using.
+try:
+    code = subprocess.call(["bun", str(REPO / "apps/tui/dist/index.mjs"), *sys.argv[1:]], env=launch_env)
+except KeyboardInterrupt:
+    code = 130
+
+
+def backend_active():
+    return subprocess.run(["systemctl", "--user", "is-active", "--quiet", "t3code-backend.service"]).returncode == 0
+
+
+def other_clients():
+    """Other t1code TUIs still running (they would lose their backend)."""
+    out = subprocess.run(["pgrep", "-f", "apps/tui/dist/index.mjs"], capture_output=True, text=True).stdout.split()
+    return [pid for pid in out if pid != str(os.getpid())]
+
+
+if ORIGIN == "http://127.0.0.1:3773" and sys.stdin.isatty() and backend_active():
+    others = other_clients()
+    note = f" ({len(others)} other t1code window(s) still use it)" if others else ""
+    try:
+        answer = input(f"Also stop the T3 backend{note}? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    if answer in ("y", "yes", "s", "si", "sí"):
+        subprocess.run(["systemctl", "--user", "stop", "t3code-backend.service"])
+        print("T3 backend stopped.")
+sys.exit(code)

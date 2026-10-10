@@ -12542,7 +12542,10 @@ export function App({
         </box>
         <box
           style={{
-            width: SIDEBAR_THREAD_TITLE_WIDTH - (TUI_SIDEBAR_WIDTH - (responsiveLayout.showSidebar ? responsiveLayout.sidebarWidth : TUI_SIDEBAR_WIDTH)),
+            width:
+              SIDEBAR_THREAD_TITLE_WIDTH -
+              (TUI_SIDEBAR_WIDTH -
+                (responsiveLayout.showSidebar ? responsiveLayout.sidebarWidth : TUI_SIDEBAR_WIDTH)),
             flexShrink: 0,
             overflow: "hidden",
             height: 1,
@@ -12553,7 +12556,9 @@ export function App({
               thread.title,
               SIDEBAR_THREAD_TITLE_WIDTH -
                 (TUI_SIDEBAR_WIDTH -
-                  (responsiveLayout.showSidebar ? responsiveLayout.sidebarWidth : TUI_SIDEBAR_WIDTH)),
+                  (responsiveLayout.showSidebar
+                    ? responsiveLayout.sidebarWidth
+                    : TUI_SIDEBAR_WIDTH)),
             )}
             style={{
               fg: isSelected

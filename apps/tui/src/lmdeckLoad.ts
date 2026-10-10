@@ -79,7 +79,9 @@ export function parseLmdeckLoad(status: unknown): LmdeckLoad | null {
 
 export async function fetchLmdeckLoad(signal?: AbortSignal): Promise<LmdeckLoad | null> {
   try {
-    const response = await fetch(LMDECK_STATUS_URL, { signal: signal ?? AbortSignal.timeout(1500) });
+    const response = await fetch(LMDECK_STATUS_URL, {
+      signal: signal ?? AbortSignal.timeout(1500),
+    });
     return response.ok ? parseLmdeckLoad(await response.json()) : null;
   } catch {
     return null;

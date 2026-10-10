@@ -75,7 +75,9 @@ describe("resolveTuiResponsiveLayout", () => {
   });
 
   it("shrinks the sidebar and drops composer labels in side-panel widths", () => {
-    expect(resolveTuiResponsiveLayout({ viewportColumns: 82, sidebarCollapsedPreference: false })).toEqual(
+    expect(
+      resolveTuiResponsiveLayout({ viewportColumns: 82, sidebarCollapsedPreference: false }),
+    ).toEqual(
       expect.objectContaining({
         sidebarWidth: 25,
         showSidebar: true,

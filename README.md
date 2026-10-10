@@ -12,9 +12,27 @@ _T3Code, but in your terminal._
 
 </div>
 
+### Fresh Arch Linux install
+
+`bun` ships in the official `extra` repository:
+
+```sh
+sudo pacman -S bun git
+```
+
+Then either run instantly or install globally (see below). If you prefer the
+upstream installer instead of pacman:
+
+```sh
+curl -fsSL https://bun.sh/install | bash
+```
+
+> [!NOTE]
+> No other prerequisites are required for a fresh system.
+
 Run instantly:
 
-```bash
+```sh
 bunx @maria_rcks/t1code
 ```
 

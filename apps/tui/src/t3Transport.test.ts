@@ -20,6 +20,7 @@ describe("real T3 data compatibility", () => {
       "serviceTier",
     );
     expect(config.providerInstances[1].instanceId).toBe("antigravity");
+    expect(config.providers[1].provider).toBe("antigravity");
   });
 
   it("coalesces replayed messages by ID without duplicating native conversation rows", () => {

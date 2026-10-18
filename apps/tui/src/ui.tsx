@@ -4190,6 +4190,7 @@ export function App({
   const timelineScrollRef = useRef<ScrollBoxRenderable | null>(null);
   const settingsSelectScrollRef = useRef<ScrollBoxRenderable | null>(null);
   const composerBranchScrollRef = useRef<ScrollBoxRenderable | null>(null);
+  const modelSelectScrollRef = useRef<ScrollBoxRenderable | null>(null);
   const gitRefreshInFlightRef = useRef(false);
   const gitRefreshQueuedRef = useRef(false);
   const [imagePasteInFlight, setImagePasteInFlight] = useState(false);
@@ -5664,7 +5665,7 @@ export function App({
     return items;
   }, [appSettings.favorites, modelMenuEntries, providerModelOptionsByInstance]);
   const modelSearchResults = useMemo(
-    () => rankModelPickerItems(modelSearchItems, modelSearchQuery).slice(0, 20),
+    () => rankModelPickerItems(modelSearchItems, modelSearchQuery).slice(0, 100),
     [modelSearchItems, modelSearchQuery],
   );
   const isModelSearchActive = modelSearchQuery.trim().length > 0;
@@ -7459,11 +7460,15 @@ export function App({
   ]);
 
   useEffect(() => {
-    const interval = setInterval(() => {
+    const scrollbox = timelineScrollRef.current;
+    if (!scrollbox) return;
+    const originalOnUpdate = scrollbox.onUpdate.bind(scrollbox);
+    scrollbox.onUpdate = (deltaTime: number) => {
+      originalOnUpdate(deltaTime);
       syncTimelineScrollState();
-    }, 120);
+    };
     return () => {
-      clearInterval(interval);
+      scrollbox.onUpdate = originalOnUpdate;
     };
   }, [syncTimelineScrollState]);
 
@@ -8503,28 +8508,44 @@ export function App({
         setModelMenuIndex(Math.min(Math.max(modelOptions.length - 1, 0), modelPickerJumpIndex));
         return;
       }
-      const printableSequence =
-        !key.ctrl && !key.meta && !key.super && key.sequence && key.sequence.length === 1
-          ? key.sequence
-          : "";
-      if (
-        printableSequence &&
-        key.name !== "return" &&
-        key.name !== "enter" &&
-        key.name !== "tab"
-      ) {
-        setModelSearchQuery((current) => `${current}${printableSequence}`);
-        setModelSubmenuOpen(true);
-        setModelMenuIndex(0);
-        return;
-      }
-      if (key.name === "backspace" || key.name === "delete") {
+      const isBackspace =
+        key.name === "backspace" ||
+        key.name === "delete" ||
+        key.sequence === "\x7f" ||
+        key.sequence === "\b";
+      if (isBackspace) {
+        key.preventDefault();
         setModelSearchQuery((current) => current.slice(0, -1));
         setModelMenuIndex(0);
         return;
       }
-      if (key.ctrl && key.name === "u") {
+      if (key.ctrl && (key.name === "u" || key.name === "w")) {
+        key.preventDefault();
         setModelSearchQuery("");
+        setModelMenuIndex(0);
+        return;
+      }
+      const printableSequence =
+        !key.ctrl &&
+        !key.meta &&
+        !key.super &&
+        key.sequence &&
+        key.sequence.length === 1 &&
+        key.name !== "backspace" &&
+        key.name !== "delete" &&
+        key.name !== "return" &&
+        key.name !== "enter" &&
+        key.name !== "kpenter" &&
+        key.name !== "linefeed" &&
+        key.name !== "tab" &&
+        key.name !== "escape" &&
+        key.sequence >= " "
+          ? key.sequence
+          : "";
+      if (printableSequence) {
+        key.preventDefault();
+        setModelSearchQuery((current) => `${current}${printableSequence}`);
+        setModelSubmenuOpen(true);
         setModelMenuIndex(0);
         return;
       }
@@ -12169,10 +12190,13 @@ export function App({
     }
   }, [focusArea, logger, overlayMenu]);
 
+  const viewportRows =
+    (process.stdout.rows ?? Number(process.env.T1CODE_HEADLESS_HEIGHT ?? 0)) || 48;
   const modelVisibleOptionCount = isModelSearchActive
     ? visibleModelSearchResults.length
     : modelOptions.length;
-  const modelMenuHeight = Math.min(Math.max(modelVisibleOptionCount, 1), 8);
+  const maxModelRows = Math.max(8, Math.min(16, viewportRows - 10));
+  const modelMenuHeight = Math.min(Math.max(modelVisibleOptionCount, 1), maxModelRows);
   const modelProvidersHeight = 2 + modelMenuEntries.length;
   const modelPopupHeight = modelSubmenuOpen
     ? Math.max(modelMenuHeight + 3, modelProvidersHeight) + 2
@@ -12183,8 +12207,16 @@ export function App({
   useEffect(() => {
     setModelMenuIndex((current) => Math.min(current, Math.max(modelVisibleOptionCount - 1, 0)));
   }, [modelVisibleOptionCount]);
-  const viewportRows =
-    (process.stdout.rows ?? Number(process.env.T1CODE_HEADLESS_HEIGHT ?? 0)) || 48;
+  useEffect(() => {
+    if (overlayMenu !== "model" || !modelSubmenuOpen) return;
+    const scrollbox = modelSelectScrollRef.current;
+    if (!scrollbox) return;
+    if (modelMenuIndex < scrollbox.scrollTop) {
+      scrollbox.scrollTo({ x: 0, y: modelMenuIndex });
+    } else if (modelMenuIndex >= scrollbox.scrollTop + modelMenuHeight) {
+      scrollbox.scrollTo({ x: 0, y: modelMenuIndex - modelMenuHeight + 1 });
+    }
+  }, [overlayMenu, modelSubmenuOpen, modelMenuIndex, modelMenuHeight]);
   const settingsSelectMenuHeight = Math.min(
     Math.max(settingsSelectItems.length, 1),
     Math.max(1, Math.min(settingsSelectKind === "thread-color" ? 10 : 6, viewportRows - 5)),
@@ -17394,9 +17426,15 @@ export function App({
               />
               {isModelSearchActive ? (
                 visibleModelSearchResults.length > 0 ? (
-                  visibleModelSearchResults
-                    .slice(0, modelMenuHeight)
-                    .map((item, index) => (
+                  <scrollbox
+                    ref={modelSelectScrollRef}
+                    style={{
+                      height: modelMenuHeight,
+                      minHeight: modelMenuHeight,
+                      ...themedScrollboxStyle(PALETTE.popup),
+                    }}
+                  >
+                    {visibleModelSearchResults.map((item, index) => (
                       <PopupRow
                         key={`model-search:${item.instanceId}:${item.slug}`}
                         icon={
@@ -17410,7 +17448,8 @@ export function App({
                         onHover={() => setModelMenuIndex(index)}
                         onPress={() => applyDraftProviderModel(item.instanceId, item.slug)}
                       />
-                    ))
+                    ))}
+                  </scrollbox>
                 ) : (
                   <text content="No matching models." style={{ fg: PALETTE.muted }} />
                 )
@@ -17420,9 +17459,15 @@ export function App({
                   style={{ fg: PALETTE.muted }}
                 />
               ) : (
-                modelOptions
-                  .slice(0, modelMenuHeight)
-                  .map((option, index) => (
+                <scrollbox
+                  ref={modelSelectScrollRef}
+                  style={{
+                    height: modelMenuHeight,
+                    minHeight: modelMenuHeight,
+                    ...themedScrollboxStyle(PALETTE.popup),
+                  }}
+                >
+                  {modelOptions.map((option, index) => (
                     <PopupRow
                       key={`${modelMenuInstanceId}:${option.slug}`}
                       icon={
@@ -17436,7 +17481,8 @@ export function App({
                       onHover={() => setModelMenuIndex(index)}
                       onPress={() => applyDraftProviderModel(modelMenuInstanceId, option.slug)}
                     />
-                  ))
+                  ))}
+                </scrollbox>
               )}
             </box>
           ) : null}

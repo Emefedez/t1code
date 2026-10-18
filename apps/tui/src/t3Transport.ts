@@ -36,9 +36,9 @@ export function adaptT3Config(config: Wire): Wire {
   return {
     ...config,
     providerInstances: config.providers,
-    providers: config.providers
-      .filter((p: Wire) => p.driver === "codex" || p.driver === "claudeAgent")
-      .map((p: Wire) => Object.assign({}, p, { provider: p.driver })),
+    providers: (config.providers ?? []).map((p: Wire) =>
+      Object.assign({}, p, { provider: p.driver }),
+    ),
   };
 }
 
